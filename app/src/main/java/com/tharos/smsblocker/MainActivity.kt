@@ -9,19 +9,51 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.ContactsContract
 import android.provider.Telephony
+import android.telephony.SmsManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -32,8 +64,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.tharos.smsblocker.ui.theme.SMSBlockerTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.core.net.toUri
 
 data class MessageThread(
     val threadId: String,
@@ -42,6 +74,13 @@ data class MessageThread(
     val snippet: String,
     val date: Long,
     val read: Boolean
+)
+
+data class ChatMessage(
+    val id: String,
+    val body: String,
+    val date: Long,
+    val isMe: Boolean
 )
 
 class MainActivity : ComponentActivity() {
@@ -59,17 +98,27 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainNavigation() {
     var currentScreen by remember { mutableStateOf("threads") }
-    // var selectedThreadId by remember { mutableStateOf<String?>(null) }
+    var selectedThreadId by remember { mutableStateOf<String?>(null) }
+    var selectedContactName by remember { mutableStateOf<String?>(null) }
+    var selectedAddress by remember { mutableStateOf<String?>(null) }
 
     Scaffold { padding ->
         Box(modifier = Modifier.padding(padding)) {
             when (currentScreen) {
                 "threads" -> ConversationListScreen(
                     onSettingsClick = { currentScreen = "settings" },
-                    onThreadClick = { _ -> 
-                        // selectedThreadId = id
-                        // currentScreen = "chat" // To be implemented
+                    onThreadClick = { thread -> 
+                        selectedThreadId = thread.threadId
+                        selectedContactName = thread.contactName ?: thread.address
+                        selectedAddress = thread.address
+                        currentScreen = "chat"
                     }
+                )
+                "chat" -> ChatScreen(
+                    threadId = selectedThreadId!!,
+                    contactName = selectedContactName ?: "Unknown",
+                    address = selectedAddress!!,
+                    onBack = { currentScreen = "threads" }
                 )
                 "settings" -> SmsBlockerSettingsScreen(
                     onBack = { currentScreen = "threads" }
@@ -81,7 +130,7 @@ fun MainNavigation() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConversationListScreen(onSettingsClick: () -> Unit, onThreadClick: (String) -> Unit) {
+fun ConversationListScreen(onSettingsClick: () -> Unit, onThreadClick: (MessageThread) -> Unit) {
     val context = LocalContext.current
     var threads by remember { mutableStateOf<List<MessageThread>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
@@ -123,7 +172,7 @@ fun ConversationListScreen(onSettingsClick: () -> Unit, onThreadClick: (String) 
         } else {
             LazyColumn {
                 items(threads) { thread ->
-                    ThreadItem(thread, onClick = { onThreadClick(thread.threadId) })
+                    ThreadItem(thread, onClick = { onThreadClick(thread) })
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 }
             }
@@ -152,6 +201,96 @@ fun ThreadItem(thread: MessageThread, onClick: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = if (!thread.read) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChatScreen(threadId: String, contactName: String, address: String, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var textValue by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(threadId) {
+        messages = fetchMessagesForThread(context, threadId)
+        if (messages.isNotEmpty()) {
+            listState.scrollToItem(messages.size - 1)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        TopAppBar(
+            title = { Text(contactName) },
+            navigationIcon = {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            }
+        )
+
+        LazyColumn(
+            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            state = listState
+        ) {
+            items(messages) { message ->
+                MessageBubble(message)
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextField(
+                value = textValue,
+                onValueChange = { textValue = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Text message") },
+                shape = RoundedCornerShape(24.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent
+                )
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            IconButton(
+                onClick = {
+                    if (textValue.isNotBlank()) {
+                        val body = textValue
+                        textValue = ""
+                        scope.launch {
+                            sendMessage(context, address, body, threadId)
+                            messages = fetchMessagesForThread(context, threadId)
+                        }
+                    }
+                },
+                enabled = textValue.isNotBlank()
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+fun MessageBubble(message: ChatMessage) {
+    val alignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
+    val color = if (message.isMe) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer
+    val textColor = if (message.isMe) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer
+    
+    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = alignment) {
+        Surface(
+            color = color,
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Text(
+                text = message.body,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                color = textColor
             )
         }
     }
@@ -234,8 +373,6 @@ private suspend fun fetchThreads(context: Context): List<MessageThread> = withCo
     val threadsMap = mutableMapOf<String, MessageThread>()
     val contentResolver: ContentResolver = context.contentResolver
     
-    // Using Telephony.Sms.CONTENT_URI to get messages and group them by thread_id
-    // This is more reliable than content://sms/conversations which may not support 'date' column on all devices
     val uri = Telephony.Sms.CONTENT_URI
     val projection = arrayOf(
         Telephony.Sms.THREAD_ID,
@@ -255,16 +392,12 @@ private suspend fun fetchThreads(context: Context): List<MessageThread> = withCo
             
             while (cursor.moveToNext()) {
                 val threadId = cursor.getString(threadIdIdx) ?: continue
-                
-                // The first message we encounter for each threadId is the latest one due to DESC sort
                 if (!threadsMap.containsKey(threadId)) {
                     val address = cursor.getString(addressIdx) ?: "Unknown"
                     val snippet = cursor.getString(bodyIdx) ?: ""
                     val date = cursor.getLong(dateIdx)
                     val read = cursor.getInt(readIdx) == 1
-                    
                     val contactName = fetchContactName(contentResolver, address)
-                    
                     threadsMap[threadId] = MessageThread(threadId, address, contactName, snippet, date, read)
                 }
             }
@@ -274,6 +407,50 @@ private suspend fun fetchThreads(context: Context): List<MessageThread> = withCo
     }
     
     threadsMap.values.toList().sortedByDescending { it.date }
+}
+
+private suspend fun fetchMessagesForThread(context: Context, threadId: String): List<ChatMessage> = withContext(Dispatchers.IO) {
+    val messages = mutableListOf<ChatMessage>()
+    val uri = Telephony.Sms.CONTENT_URI
+    val projection = arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE)
+    val selection = "${Telephony.Sms.THREAD_ID} = ?"
+    val selectionArgs = arrayOf(threadId)
+    
+    context.contentResolver.query(uri, projection, selection, selectionArgs, "${Telephony.Sms.DATE} ASC")?.use { cursor ->
+        val idIdx = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
+        val bodyIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
+        val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
+        val typeIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+        
+        while (cursor.moveToNext()) {
+            val id = cursor.getString(idIdx)
+            val body = cursor.getString(bodyIdx) ?: ""
+            val date = cursor.getLong(dateIdx)
+            val type = cursor.getInt(typeIdx)
+            val isMe = type == Telephony.Sms.MESSAGE_TYPE_SENT
+            messages.add(ChatMessage(id, body, date, isMe))
+        }
+    }
+    messages
+}
+
+private suspend fun sendMessage(context: Context, address: String, body: String, threadId: String) = withContext(Dispatchers.IO) {
+    try {
+        val smsManager = context.getSystemService(SmsManager::class.java)
+        smsManager.sendTextMessage(address, null, body, null, null)
+        
+        // Manual save to telephony for "Sent" status
+        val values = android.content.ContentValues().apply {
+            put(Telephony.Sms.ADDRESS, address)
+            put(Telephony.Sms.BODY, body)
+            put(Telephony.Sms.THREAD_ID, threadId)
+            put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
+            put(Telephony.Sms.DATE, System.currentTimeMillis())
+        }
+        context.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, values)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
 }
 
 private fun fetchContactName(contentResolver: ContentResolver, phoneNumber: String): String? {
