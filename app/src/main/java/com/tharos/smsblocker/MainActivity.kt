@@ -1,11 +1,14 @@
 package com.tharos.smsblocker
 
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.ContactsContract
 import android.provider.Telephony
@@ -32,11 +35,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -87,11 +92,26 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        createNotificationChannel(this)
         setContent {
             SMSBlockerTheme {
                 MainNavigation()
             }
         }
+    }
+}
+
+fun createNotificationChannel(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val name = "SMS Messages"
+        val descriptionText = "Notifications for new SMS messages"
+        val importance = NotificationManager.IMPORTANCE_HIGH
+        val channel = NotificationChannel("sms_channel", name, importance).apply {
+            description = descriptionText
+        }
+        val notificationManager: NotificationManager =
+            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.createNotificationChannel(channel)
     }
 }
 
@@ -112,11 +132,24 @@ fun MainNavigation() {
                         selectedContactName = thread.contactName ?: thread.address
                         selectedAddress = thread.address
                         currentScreen = "chat"
-                    }
+                    },
+                    onNewChat = { currentScreen = "new_chat" }
                 )
                 "chat" -> ChatScreen(
                     threadId = selectedThreadId!!,
                     contactName = selectedContactName ?: "Unknown",
+                    address = selectedAddress!!,
+                    onBack = { currentScreen = "threads" }
+                )
+                "new_chat" -> NewChatScreen(
+                    onBack = { currentScreen = "threads" },
+                    onStartChat = { address ->
+                        selectedAddress = address
+                        selectedContactName = null
+                        currentScreen = "chat_by_address"
+                    }
+                )
+                "chat_by_address" -> ChatByAddressScreen(
                     address = selectedAddress!!,
                     onBack = { currentScreen = "threads" }
                 )
@@ -130,7 +163,11 @@ fun MainNavigation() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConversationListScreen(onSettingsClick: () -> Unit, onThreadClick: (MessageThread) -> Unit) {
+fun ConversationListScreen(
+    onSettingsClick: () -> Unit, 
+    onThreadClick: (MessageThread) -> Unit,
+    onNewChat: () -> Unit
+) {
     val context = LocalContext.current
     var threads by remember { mutableStateOf<List<MessageThread>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
@@ -149,31 +186,39 @@ fun ConversationListScreen(onSettingsClick: () -> Unit, onThreadClick: (MessageT
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        CenterAlignedTopAppBar(
-            title = { Text("Messages") },
-            actions = {
-                IconButton(onClick = onSettingsClick) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings")
-                }
+    Scaffold(
+        floatingActionButton = {
+            FloatingActionButton(onClick = onNewChat) {
+                Icon(Icons.Default.Add, contentDescription = "New Message")
             }
-        )
+        }
+    ) { p ->
+        Column(modifier = Modifier.fillMaxSize().padding(p)) {
+            CenterAlignedTopAppBar(
+                title = { Text("Messages") },
+                actions = {
+                    IconButton(onClick = onSettingsClick) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                    }
+                }
+            )
 
-        if (!hasPermissions.value) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Button(onClick = onSettingsClick) {
-                    Text("Grant Permissions in Settings")
+            if (!hasPermissions.value) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Button(onClick = onSettingsClick) {
+                        Text("Grant Permissions in Settings")
+                    }
                 }
-            }
-        } else if (isLoading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        } else {
-            LazyColumn {
-                items(threads) { thread ->
-                    ThreadItem(thread, onClick = { onThreadClick(thread) })
-                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            } else if (isLoading) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                LazyColumn {
+                    items(threads) { thread ->
+                        ThreadItem(thread, onClick = { onThreadClick(thread) })
+                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                    }
                 }
             }
         }
@@ -208,17 +253,73 @@ fun ThreadItem(thread: MessageThread, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
+    var phoneNumber by remember { mutableStateOf("") }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        TopAppBar(
+            title = { Text("New Message") },
+            navigationIcon = {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            }
+        )
+
+        Column(modifier = Modifier.padding(16.dp)) {
+            TextField(
+                value = phoneNumber,
+                onValueChange = { phoneNumber = it },
+                label = { Text("Recipient number") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = { if (phoneNumber.isNotBlank()) onStartChat(phoneNumber) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = phoneNumber.isNotBlank()
+            ) {
+                Text("Start Chat")
+            }
+        }
+    }
+}
+
+@Composable
+fun ChatByAddressScreen(address: String, onBack: () -> Unit) {
+    val context = LocalContext.current
+    var threadId by remember { mutableStateOf<String?>(null) }
+    var contactName by remember { mutableStateOf(address) }
+
+    LaunchedEffect(address) {
+        threadId = fetchThreadIdByAddress(context, address)
+        contactName = fetchContactName(context.contentResolver, address) ?: address
+    }
+
+    if (threadId != null) {
+        ChatScreen(threadId = threadId!!, contactName = contactName, address = address, onBack = onBack)
+    } else {
+        ChatScreen(threadId = "-1", contactName = contactName, address = address, onBack = onBack)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 fun ChatScreen(threadId: String, contactName: String, address: String, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var textValue by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    var currentThreadId by remember { mutableStateOf(threadId) }
 
-    LaunchedEffect(threadId) {
-        messages = fetchMessagesForThread(context, threadId)
-        if (messages.isNotEmpty()) {
-            listState.scrollToItem(messages.size - 1)
+    LaunchedEffect(currentThreadId) {
+        if (currentThreadId != "-1") {
+            messages = fetchMessagesForThread(context, currentThreadId)
+            if (messages.isNotEmpty()) {
+                listState.scrollToItem(messages.size - 1)
+            }
         }
     }
 
@@ -263,8 +364,15 @@ fun ChatScreen(threadId: String, contactName: String, address: String, onBack: (
                         val body = textValue
                         textValue = ""
                         scope.launch {
-                            sendMessage(context, address, body, threadId)
-                            messages = fetchMessagesForThread(context, threadId)
+                            sendMessage(context, address, body, if (currentThreadId == "-1") null else currentThreadId)
+                            if (currentThreadId == "-1") {
+                                currentThreadId = fetchThreadIdByAddress(context, address) ?: "-1"
+                            }
+                            messages = if (currentThreadId != "-1") {
+                                fetchMessagesForThread(context, currentThreadId)
+                            } else {
+                                messages + ChatMessage("temp", body, System.currentTimeMillis(), true)
+                            }
                         }
                     }
                 },
@@ -338,7 +446,9 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
                 Manifest.permission.READ_SMS,
                 Manifest.permission.SEND_SMS,
                 Manifest.permission.RECEIVE_MMS,
-                Manifest.permission.READ_CONTACTS
+                Manifest.permission.READ_CONTACTS,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) 
+                    Manifest.permission.POST_NOTIFICATIONS else Manifest.permission.RECEIVE_SMS
             ))
         }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
             Text("Grant Permissions")
@@ -434,16 +544,29 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
     messages
 }
 
-private suspend fun sendMessage(context: Context, address: String, body: String, threadId: String) = withContext(Dispatchers.IO) {
+private suspend fun fetchThreadIdByAddress(context: Context, address: String): String? = withContext(Dispatchers.IO) {
+    val uri = Telephony.Sms.CONTENT_URI
+    val projection = arrayOf(Telephony.Sms.THREAD_ID)
+    val selection = "${Telephony.Sms.ADDRESS} = ?"
+    val selectionArgs = arrayOf(address)
+    
+    context.contentResolver.query(uri, projection, selection, selectionArgs, "${Telephony.Sms.DATE} DESC LIMIT 1")?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            return@withContext cursor.getString(cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID))
+        }
+    }
+    null
+}
+
+private suspend fun sendMessage(context: Context, address: String, body: String, threadId: String?) = withContext(Dispatchers.IO) {
     try {
         val smsManager = context.getSystemService(SmsManager::class.java)
         smsManager.sendTextMessage(address, null, body, null, null)
         
-        // Manual save to telephony for "Sent" status
         val values = android.content.ContentValues().apply {
             put(Telephony.Sms.ADDRESS, address)
             put(Telephony.Sms.BODY, body)
-            put(Telephony.Sms.THREAD_ID, threadId)
+            if (threadId != null && threadId != "-1") put(Telephony.Sms.THREAD_ID, threadId)
             put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
             put(Telephony.Sms.DATE, System.currentTimeMillis())
         }
