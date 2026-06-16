@@ -14,6 +14,7 @@ import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -121,6 +122,10 @@ fun MainNavigation() {
     var selectedThreadId by remember { mutableStateOf<String?>(null) }
     var selectedContactName by remember { mutableStateOf<String?>(null) }
     var selectedAddress by remember { mutableStateOf<String?>(null) }
+
+    BackHandler(enabled = currentScreen != "threads") {
+        currentScreen = "threads"
+    }
 
     Scaffold { padding ->
         Box(modifier = Modifier.padding(padding)) {
