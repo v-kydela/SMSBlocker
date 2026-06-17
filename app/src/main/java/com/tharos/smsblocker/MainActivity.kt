@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -70,8 +71,12 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.tharos.smsblocker.ui.theme.SMSBlockerTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.core.net.toUri
 
 data class MessageThread(
     val threadId: String,
@@ -122,6 +127,22 @@ fun MainNavigation() {
     var selectedThreadId by remember { mutableStateOf<String?>(null) }
     var selectedContactName by remember { mutableStateOf<String?>(null) }
     var selectedAddress by remember { mutableStateOf<String?>(null) }
+    
+    val context = LocalContext.current
+    val hasRequiredPermissions = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
+                                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+
+    // Cache threads at the navigation level to avoid re-loading when returning from chat
+    var threads by remember { mutableStateOf<List<MessageThread>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
+
+    LaunchedEffect(hasRequiredPermissions) {
+        if (hasRequiredPermissions && threads.isEmpty()) {
+            isLoading = true
+            threads = fetchThreads(context)
+            isLoading = false
+        }
+    }
 
     BackHandler(enabled = currentScreen != "threads") {
         currentScreen = "threads"
@@ -131,6 +152,9 @@ fun MainNavigation() {
         Box(modifier = Modifier.padding(padding)) {
             when (currentScreen) {
                 "threads" -> ConversationListScreen(
+                    threads = threads,
+                    isLoading = isLoading,
+                    hasPermissions = hasRequiredPermissions,
                     onSettingsClick = { currentScreen = "settings" },
                     onThreadClick = { thread -> 
                         selectedThreadId = thread.threadId
@@ -169,28 +193,13 @@ fun MainNavigation() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationListScreen(
+    threads: List<MessageThread>,
+    isLoading: Boolean,
+    hasPermissions: Boolean,
     onSettingsClick: () -> Unit, 
     onThreadClick: (MessageThread) -> Unit,
     onNewChat: () -> Unit
 ) {
-    val context = LocalContext.current
-    var threads by remember { mutableStateOf<List<MessageThread>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-
-    val hasPermissions = remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
-        )
-    }
-
-    LaunchedEffect(hasPermissions.value) {
-        if (hasPermissions.value) {
-            threads = fetchThreads(context)
-            isLoading = false
-        }
-    }
-
     Scaffold(
         floatingActionButton = {
             FloatingActionButton(onClick = onNewChat) {
@@ -208,7 +217,7 @@ fun ConversationListScreen(
                 }
             )
 
-            if (!hasPermissions.value) {
+            if (!hasPermissions) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Button(onClick = onSettingsClick) {
                         Text("Grant Permissions in Settings")
@@ -217,6 +226,10 @@ fun ConversationListScreen(
             } else if (isLoading) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
+                }
+            } else if (threads.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No messages found", style = MaterialTheme.typography.bodyLarge)
                 }
             } else {
                 LazyColumn {
@@ -484,44 +497,77 @@ fun StatusRow(label: String, status: Boolean) {
     Text("$label: ${if (status) "✅" else "❌"}")
 }
 
-private suspend fun fetchThreads(context: Context): List<MessageThread> = withContext(Dispatchers.IO) {
-    val threadsMap = mutableMapOf<String, MessageThread>()
+private suspend fun fetchThreads(context: Context): List<MessageThread> = coroutineScope {
+    val threads = mutableListOf<MessageThread>()
     val contentResolver: ContentResolver = context.contentResolver
     
-    val uri = Telephony.Sms.CONTENT_URI
+    // Using mms-sms/conversations is the standard way to get threads
+    val uri = "content://mms-sms/conversations?simple=true".toUri()
     val projection = arrayOf(
-        Telephony.Sms.THREAD_ID,
-        Telephony.Sms.ADDRESS,
-        Telephony.Sms.BODY,
-        Telephony.Sms.DATE,
-        Telephony.Sms.READ
+        "_id",
+        "snippet",
+        "date",
+        "read",
+        "recipient_ids"
     )
     
-    try {
-        contentResolver.query(uri, projection, null, null, "${Telephony.Sms.DATE} DESC")?.use { cursor ->
-            val threadIdIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
-            val addressIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
-            val bodyIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
-            val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
-            val readIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
+    val sortOrder = "date DESC"
+    
+    withContext(Dispatchers.IO) {
+        Log.d("SMSBlocker", "Fetching threads from $uri")
+        val cursor = try {
+            contentResolver.query(uri, projection, null, null, sortOrder)
+        } catch (e: Exception) {
+            Log.e("SMSBlocker", "Failed to query conversations", e)
+            null
+        }
+
+        cursor?.use { c ->
+            Log.d("SMSBlocker", "Cursor count: ${c.count}")
+            val idIdx = c.getColumnIndex("_id")
+            val snippetIdx = c.getColumnIndex("snippet")
+            val dateIdx = c.getColumnIndex("date")
+            val readIdx = c.getColumnIndex("read")
+            val recipientIdsIdx = c.getColumnIndex("recipient_ids")
             
-            while (cursor.moveToNext()) {
-                val threadId = cursor.getString(threadIdIdx) ?: continue
-                if (!threadsMap.containsKey(threadId)) {
-                    val address = cursor.getString(addressIdx) ?: "Unknown"
-                    val snippet = cursor.getString(bodyIdx) ?: ""
-                    val date = cursor.getLong(dateIdx)
-                    val read = cursor.getInt(readIdx) == 1
-                    val contactName = fetchContactName(contentResolver, address)
-                    threadsMap[threadId] = MessageThread(threadId, address, contactName, snippet, date, read)
-                }
+            while (c.moveToNext()) {
+                val threadId = c.getString(idIdx) ?: continue
+                val snippet = c.getString(snippetIdx) ?: ""
+                val date = c.getLong(dateIdx)
+                val read = c.getInt(readIdx) == 1
+                val recipientIds = c.getString(recipientIdsIdx) ?: ""
+                
+                // We'll resolve the address from recipientIds later
+                threads.add(MessageThread(threadId, recipientIds, null, snippet, date, read))
             }
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
     }
     
-    threadsMap.values.toList().sortedByDescending { it.date }
+    // Parallel resolution of addresses and contact names
+    threads.map { thread ->
+        async(Dispatchers.IO) {
+            val address = fetchAddressForRecipientId(contentResolver, thread.address) ?: "Unknown"
+            val name = fetchContactName(contentResolver, address)
+            thread.copy(address = address, contactName = name)
+        }
+    }.awaitAll()
+}
+
+private fun fetchAddressForRecipientId(contentResolver: ContentResolver, recipientId: String): String? {
+    if (recipientId.isBlank()) return null
+    // recipientId can be multiple IDs separated by space, we just take the first one for now
+    val firstId = recipientId.split(" ").firstOrNull() ?: return null
+    
+    val uri = "content://mms-sms/canonical-address/$firstId".toUri()
+    return try {
+        contentResolver.query(uri, null, null, null, null)?.use {
+            if (it.moveToFirst()) {
+                it.getString(0) // The address is in the first column
+            } else null
+        }
+    } catch (_: Exception) {
+        null
+    }
 }
 
 private suspend fun fetchMessagesForThread(context: Context, threadId: String): List<ChatMessage> = withContext(Dispatchers.IO) {
