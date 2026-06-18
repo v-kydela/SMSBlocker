@@ -129,6 +129,7 @@ fun MainNavigation() {
     var selectedAddress by remember { mutableStateOf<String?>(null) }
     
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val hasRequiredPermissions = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
                                 ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
 
@@ -136,9 +137,10 @@ fun MainNavigation() {
     var threads by remember { mutableStateOf<List<MessageThread>>(emptyList()) }
     var isLoading by remember { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
 
-    LaunchedEffect(hasRequiredPermissions) {
-        if (hasRequiredPermissions && threads.isEmpty()) {
-            isLoading = true
+    // Refresh threads whenever we are on the threads screen
+    LaunchedEffect(hasRequiredPermissions, currentScreen) {
+        if (hasRequiredPermissions && currentScreen == "threads") {
+            if (threads.isEmpty()) isLoading = true
             threads = fetchThreads(context)
             isLoading = false
         }
@@ -161,6 +163,16 @@ fun MainNavigation() {
                         selectedContactName = thread.contactName ?: thread.address
                         selectedAddress = thread.address
                         currentScreen = "chat"
+                        
+                        // Mark as read in DB and update local state
+                        if (!thread.read) {
+                            scope.launch {
+                                markThreadAsRead(context, thread.threadId)
+                                threads = threads.map { 
+                                    if (it.threadId == thread.threadId) it.copy(read = true) else it 
+                                }
+                            }
+                        }
                     },
                     onNewChat = { currentScreen = "new_chat" }
                 )
@@ -334,6 +346,7 @@ fun ChatScreen(threadId: String, contactName: String, address: String, onBack: (
 
     LaunchedEffect(currentThreadId) {
         if (currentThreadId != "-1") {
+            markThreadAsRead(context, currentThreadId)
             messages = fetchMessagesForThread(context, currentThreadId)
             if (messages.isNotEmpty()) {
                 listState.scrollToItem(messages.size - 1)
@@ -593,6 +606,18 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
         }
     }
     messages
+}
+
+private suspend fun markThreadAsRead(context: Context, threadId: String) = withContext(Dispatchers.IO) {
+    try {
+        val values = android.content.ContentValues().apply {
+            put("read", 1)
+        }
+        val uri = "content://sms/".toUri()
+        context.contentResolver.update(uri, values, "thread_id = ? AND read = 0", arrayOf(threadId))
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to mark thread as read", e)
+    }
 }
 
 private suspend fun fetchThreadIdByAddress(context: Context, address: String): String? = withContext(Dispatchers.IO) {
