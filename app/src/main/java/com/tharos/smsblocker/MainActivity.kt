@@ -609,12 +609,33 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
 }
 
 private suspend fun markThreadAsRead(context: Context, threadId: String) = withContext(Dispatchers.IO) {
+    val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    if (!isDefault) {
+        Log.w("SMSBlocker", "Not default SMS app: markThreadAsRead will likely be ignored by the system.")
+    }
+
     try {
         val values = android.content.ContentValues().apply {
             put("read", 1)
+            put("seen", 1)
         }
-        val uri = "content://sms/".toUri()
-        context.contentResolver.update(uri, values, "thread_id = ? AND read = 0", arrayOf(threadId))
+        
+        val contentResolver = context.contentResolver
+        val selection = "thread_id = ?"
+        val selectionArgs = arrayOf(threadId)
+
+        // 1. Mark SMS as read and seen
+        contentResolver.update(Telephony.Sms.CONTENT_URI, values, selection, selectionArgs)
+        
+        // 2. Mark MMS as read and seen
+        val mmsUri = "content://mms/".toUri()
+        contentResolver.update(mmsUri, values, selection, selectionArgs)
+        
+        // 3. Update the conversation thread itself
+        val threadUri = "content://mms-sms/conversations/$threadId".toUri()
+        contentResolver.update(threadUri, values, null, null)
+        
+        Log.d("SMSBlocker", "Thread $threadId marked as read (Success: $isDefault)")
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to mark thread as read", e)
     }
