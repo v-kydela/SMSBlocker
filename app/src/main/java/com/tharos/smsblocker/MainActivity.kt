@@ -55,8 +55,10 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -136,9 +138,31 @@ fun MainNavigation() {
     // Cache threads at the navigation level to avoid re-loading when returning from chat
     var threads by remember { mutableStateOf<List<MessageThread>>(emptyList()) }
     var isLoading by remember { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
+    var refreshTrigger by remember { mutableIntStateOf(0) }
 
-    // Refresh threads whenever we are on the threads screen
-    LaunchedEffect(hasRequiredPermissions, currentScreen) {
+    // Register a ContentObserver to listen for SMS database changes
+    val observer = remember {
+        object : android.database.ContentObserver(null) {
+            override fun onChange(selfChange: Boolean) {
+                Log.d("SMSBlocker", "SMS Database changed, triggering refresh")
+                refreshTrigger++
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        context.contentResolver.registerContentObserver(
+            Telephony.Sms.CONTENT_URI,
+            true,
+            observer
+        )
+        onDispose {
+            context.contentResolver.unregisterContentObserver(observer)
+        }
+    }
+
+    // Refresh threads whenever we are on the threads screen OR the database changes
+    LaunchedEffect(hasRequiredPermissions, currentScreen, refreshTrigger) {
         if (hasRequiredPermissions && currentScreen == "threads") {
             if (threads.isEmpty()) isLoading = true
             threads = fetchThreads(context)
@@ -180,6 +204,7 @@ fun MainNavigation() {
                     threadId = selectedThreadId!!,
                     contactName = selectedContactName ?: "Unknown",
                     address = selectedAddress!!,
+                    refreshTrigger = refreshTrigger,
                     onBack = { currentScreen = "threads" }
                 )
                 "new_chat" -> NewChatScreen(
@@ -192,6 +217,7 @@ fun MainNavigation() {
                 )
                 "chat_by_address" -> ChatByAddressScreen(
                     address = selectedAddress!!,
+                    refreshTrigger = refreshTrigger,
                     onBack = { currentScreen = "threads" }
                 )
                 "settings" -> SmsBlockerSettingsScreen(
@@ -317,7 +343,7 @@ fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
 }
 
 @Composable
-fun ChatByAddressScreen(address: String, onBack: () -> Unit) {
+fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> Unit) {
     val context = LocalContext.current
     var threadId by remember { mutableStateOf<String?>(null) }
     var contactName by remember { mutableStateOf(address) }
@@ -328,15 +354,15 @@ fun ChatByAddressScreen(address: String, onBack: () -> Unit) {
     }
 
     if (threadId != null) {
-        ChatScreen(threadId = threadId!!, contactName = contactName, address = address, onBack = onBack)
+        ChatScreen(threadId = threadId!!, contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack)
     } else {
-        ChatScreen(threadId = "-1", contactName = contactName, address = address, onBack = onBack)
+        ChatScreen(threadId = "-1", contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(threadId: String, contactName: String, address: String, onBack: () -> Unit) {
+fun ChatScreen(threadId: String, contactName: String, address: String, refreshTrigger: Int = 0, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
@@ -344,12 +370,14 @@ fun ChatScreen(threadId: String, contactName: String, address: String, onBack: (
     val listState = rememberLazyListState()
     var currentThreadId by remember { mutableStateOf(threadId) }
 
-    LaunchedEffect(currentThreadId) {
+    LaunchedEffect(currentThreadId, refreshTrigger) {
         if (currentThreadId != "-1") {
-            markThreadAsRead(context, currentThreadId)
+            if (refreshTrigger > 0) {
+                markThreadAsRead(context, currentThreadId)
+            }
             messages = fetchMessagesForThread(context, currentThreadId)
             if (messages.isNotEmpty()) {
-                listState.scrollToItem(messages.size - 1)
+                listState.animateScrollToItem(messages.size - 1)
             }
         }
     }
@@ -585,27 +613,83 @@ private fun fetchAddressForRecipientId(contentResolver: ContentResolver, recipie
 
 private suspend fun fetchMessagesForThread(context: Context, threadId: String): List<ChatMessage> = withContext(Dispatchers.IO) {
     val messages = mutableListOf<ChatMessage>()
-    val uri = Telephony.Sms.CONTENT_URI
-    val projection = arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE)
-    val selection = "${Telephony.Sms.THREAD_ID} = ?"
+    val contentResolver = context.contentResolver
+
+    // 1. Fetch SMS
+    val smsUri = Telephony.Sms.CONTENT_URI
+    val smsProjection = arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE)
+    val smsSelection = "${Telephony.Sms.THREAD_ID} = ?"
     val selectionArgs = arrayOf(threadId)
     
-    context.contentResolver.query(uri, projection, selection, selectionArgs, "${Telephony.Sms.DATE} ASC")?.use { cursor ->
+    contentResolver.query(smsUri, smsProjection, smsSelection, selectionArgs, null)?.use { cursor ->
         val idIdx = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
         val bodyIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
         val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
         val typeIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
         
         while (cursor.moveToNext()) {
-            val id = cursor.getString(idIdx)
-            val body = cursor.getString(bodyIdx) ?: ""
-            val date = cursor.getLong(dateIdx)
-            val type = cursor.getInt(typeIdx)
-            val isMe = type == Telephony.Sms.MESSAGE_TYPE_SENT
-            messages.add(ChatMessage(id, body, date, isMe))
+            messages.add(ChatMessage(
+                id = "sms_${cursor.getString(idIdx)}",
+                body = cursor.getString(bodyIdx) ?: "",
+                date = cursor.getLong(dateIdx),
+                isMe = cursor.getInt(typeIdx) == Telephony.Sms.MESSAGE_TYPE_SENT
+            ))
         }
     }
-    messages
+
+    // 2. Fetch MMS
+    val mmsUri = Telephony.Mms.CONTENT_URI
+    val mmsProjection = arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX)
+    val mmsSelection = "${Telephony.Mms.THREAD_ID} = ?"
+    
+    contentResolver.query(mmsUri, mmsProjection, mmsSelection, selectionArgs, null)?.use { cursor ->
+        val idIdx = cursor.getColumnIndexOrThrow(Telephony.Mms._ID)
+        val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.DATE)
+        val boxIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.MESSAGE_BOX)
+        
+        while (cursor.moveToNext()) {
+            val mmsId = cursor.getString(idIdx)
+            // MMS date is in seconds, SMS is in milliseconds
+            val date = cursor.getLong(dateIdx) * 1000 
+            val isMe = cursor.getInt(boxIdx) == Telephony.Mms.MESSAGE_BOX_SENT
+            
+            val body = fetchMmsText(contentResolver, mmsId)
+            if (body.isNotBlank()) {
+                messages.add(ChatMessage(
+                    id = "mms_$mmsId",
+                    body = body,
+                    date = date,
+                    isMe = isMe
+                ))
+            }
+        }
+    }
+
+    messages.sortedBy { it.date }
+}
+
+private fun fetchMmsText(contentResolver: ContentResolver, mmsId: String): String {
+    val selection = "mid = ?"
+    val selectionArgs = arrayOf(mmsId)
+    val uri = "content://mms/part".toUri()
+    val sb = StringBuilder()
+    
+    try {
+        contentResolver.query(uri, null, selection, selectionArgs, null)?.use { cursor ->
+            val ctIdx = cursor.getColumnIndex("ct")
+            val textIdx = cursor.getColumnIndex("text")
+            
+            while (cursor.moveToNext()) {
+                val ct = cursor.getString(ctIdx)
+                if (ct == "text/plain") {
+                    sb.append(cursor.getString(textIdx) ?: "")
+                }
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Error fetching MMS text", e)
+    }
+    return sb.toString()
 }
 
 private suspend fun markThreadAsRead(context: Context, threadId: String) = withContext(Dispatchers.IO) {
@@ -642,15 +726,19 @@ private suspend fun markThreadAsRead(context: Context, threadId: String) = withC
 }
 
 private suspend fun fetchThreadIdByAddress(context: Context, address: String): String? = withContext(Dispatchers.IO) {
-    val uri = Telephony.Sms.CONTENT_URI
-    val projection = arrayOf(Telephony.Sms.THREAD_ID)
-    val selection = "${Telephony.Sms.ADDRESS} = ?"
-    val selectionArgs = arrayOf(address)
-    
-    context.contentResolver.query(uri, projection, selection, selectionArgs, "${Telephony.Sms.DATE} DESC LIMIT 1")?.use { cursor ->
-        if (cursor.moveToFirst()) {
-            return@withContext cursor.getString(cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID))
+    try {
+        val uri = "content://mms-sms/threadID".toUri()
+        val projection = arrayOf("_id")
+        val selection = "address = ?"
+        val selectionArgs = arrayOf(address)
+        
+        context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                return@withContext cursor.getString(0)
+            }
         }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Error getting thread ID by address", e)
     }
     null
 }
