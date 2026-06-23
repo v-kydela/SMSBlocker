@@ -71,14 +71,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import com.tharos.smsblocker.ui.theme.SMSBlockerTheme
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.core.net.toUri
 
 data class MessageThread(
     val threadId: String,
@@ -165,8 +162,16 @@ fun MainNavigation() {
     LaunchedEffect(hasRequiredPermissions, currentScreen, refreshTrigger) {
         if (hasRequiredPermissions && currentScreen == "threads") {
             if (threads.isEmpty()) isLoading = true
-            threads = fetchThreads(context)
+            
+            // Phase 1: Quick fetch of threads and addresses
+            val baseThreads = fetchBaseThreads(context)
+            threads = baseThreads
             isLoading = false
+            
+            // Phase 2: Resolve contact names in background
+            if (baseThreads.isNotEmpty()) {
+                threads = resolveThreadNames(context, baseThreads)
+            }
         }
     }
 
@@ -538,33 +543,17 @@ fun StatusRow(label: String, status: Boolean) {
     Text("$label: ${if (status) "✅" else "❌"}")
 }
 
-private suspend fun fetchThreads(context: Context): List<MessageThread> = coroutineScope {
-    val threads = mutableListOf<MessageThread>()
+private suspend fun fetchBaseThreads(context: Context): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
-    
-    // Using mms-sms/conversations is the standard way to get threads
     val uri = "content://mms-sms/conversations?simple=true".toUri()
-    val projection = arrayOf(
-        "_id",
-        "snippet",
-        "date",
-        "read",
-        "recipient_ids"
-    )
-    
-    val sortOrder = "date DESC"
-    
-    withContext(Dispatchers.IO) {
-        Log.d("SMSBlocker", "Fetching threads from $uri")
-        val cursor = try {
-            contentResolver.query(uri, projection, null, null, sortOrder)
-        } catch (e: Exception) {
-            Log.e("SMSBlocker", "Failed to query conversations", e)
-            null
-        }
+    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids")
+    val sortOrder = "date DESC LIMIT 50"
 
-        cursor?.use { c ->
-            Log.d("SMSBlocker", "Cursor count: ${c.count}")
+    val threads = mutableListOf<MessageThread>()
+    val recipientIdSet = mutableSetOf<String>()
+
+    try {
+        contentResolver.query(uri, projection, null, null, sortOrder)?.use { c ->
             val idIdx = c.getColumnIndex("_id")
             val snippetIdx = c.getColumnIndex("snippet")
             val dateIdx = c.getColumnIndex("date")
@@ -578,36 +567,67 @@ private suspend fun fetchThreads(context: Context): List<MessageThread> = corout
                 val read = c.getInt(readIdx) == 1
                 val recipientIds = c.getString(recipientIdsIdx) ?: ""
                 
-                // We'll resolve the address from recipientIds later
-                threads.add(MessageThread(threadId, recipientIds, null, snippet, date, read))
+                val firstId = recipientIds.split(" ").firstOrNull() ?: ""
+                if (firstId.isNotBlank()) recipientIdSet.add(firstId)
+                
+                // Store recipientId in address field temporarily for resolution
+                threads.add(MessageThread(threadId, firstId, null, snippet, date, read))
             }
         }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to query conversations", e)
     }
-    
-    // Parallel resolution of addresses and contact names
-    threads.map { thread ->
-        async(Dispatchers.IO) {
-            val address = fetchAddressForRecipientId(contentResolver, thread.address) ?: "Unknown"
-            val name = fetchContactName(contentResolver, address)
-            thread.copy(address = address, contactName = name)
+
+    // Bulk fetch ONLY the required canonical addresses
+    if (recipientIdSet.isNotEmpty()) {
+        val addrMap = mutableMapOf<String, String>()
+        val selection = "_id IN (${recipientIdSet.joinToString(",")})"
+        try {
+            contentResolver.query("content://mms-sms/canonical-addresses".toUri(), arrayOf("_id", "address"), selection, null, null)?.use { c ->
+                val idIdx = c.getColumnIndex("_id")
+                val addrIdx = c.getColumnIndex("address")
+                while (c.moveToNext()) {
+                    addrMap[c.getString(idIdx)] = c.getString(addrIdx)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("SMSBlocker", "Error fetching canonical addresses", e)
         }
-    }.awaitAll()
+        
+        return@withContext threads.map { it.copy(address = addrMap[it.address] ?: "Unknown") }
+    }
+
+    threads
 }
 
-private fun fetchAddressForRecipientId(contentResolver: ContentResolver, recipientId: String): String? {
-    if (recipientId.isBlank()) return null
-    // recipientId can be multiple IDs separated by space, we just take the first one for now
-    val firstId = recipientId.split(" ").firstOrNull() ?: return null
+private suspend fun resolveThreadNames(context: Context, threads: List<MessageThread>): List<MessageThread> = withContext(Dispatchers.IO) {
+    val contentResolver = context.contentResolver
+    val uniqueAddresses = threads.map { it.address }.filter { it != "Unknown" }.distinct()
+    if (uniqueAddresses.isEmpty()) return@withContext threads
+
+    // Optimized: Fetch all relevant contacts in one pass instead of 50 separate queries
+    val contactMap = mutableMapOf<String, String>()
+    val contactUri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+    val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
     
-    val uri = "content://mms-sms/canonical-address/$firstId".toUri()
-    return try {
-        contentResolver.query(uri, null, null, null, null)?.use {
-            if (it.moveToFirst()) {
-                it.getString(0) // The address is in the first column
-            } else null
+    try {
+        contentResolver.query(contactUri, projection, null, null, null)?.use { cursor ->
+            val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+            val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                val number = cursor.getString(numIdx)?.replace(Regex("[^0-9+]"), "") ?: continue
+                val name = cursor.getString(nameIdx) ?: continue
+                contactMap[number] = name
+            }
         }
-    } catch (_: Exception) {
-        null
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Error fetching contacts bulk", e)
+    }
+
+    threads.map { thread ->
+        val normalized = thread.address.replace(Regex("[^0-9+]"), "")
+        val name = contactMap[normalized] ?: fetchContactName(contentResolver, thread.address)
+        thread.copy(contactName = name)
     }
 }
 
