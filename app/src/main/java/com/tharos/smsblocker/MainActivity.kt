@@ -38,7 +38,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
@@ -70,12 +73,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import com.tharos.smsblocker.ui.theme.SMSBlockerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class MessageThread(
     val threadId: String,
@@ -203,7 +210,13 @@ fun MainNavigation() {
                             }
                         }
                     },
-                    onNewChat = { currentScreen = "new_chat" }
+                    onNewChat = { currentScreen = "new_chat" },
+                    onDeleteThread = { threadId ->
+                        scope.launch {
+                            deleteThread(context, threadId)
+                            threads = threads.filter { it.threadId != threadId }
+                        }
+                    }
                 )
                 "chat" -> ChatScreen(
                     threadId = selectedThreadId!!,
@@ -241,8 +254,11 @@ fun ConversationListScreen(
     hasPermissions: Boolean,
     onSettingsClick: () -> Unit, 
     onThreadClick: (MessageThread) -> Unit,
-    onNewChat: () -> Unit
+    onNewChat: () -> Unit,
+    onDeleteThread: (String) -> Unit
 ) {
+    var threadToDelete by remember { mutableStateOf<MessageThread?>(null) }
+
     Scaffold(
         floatingActionButton = {
             FloatingActionButton(onClick = onNewChat) {
@@ -276,18 +292,45 @@ fun ConversationListScreen(
                 }
             } else {
                 LazyColumn {
-                    items(threads) { thread ->
-                        ThreadItem(thread, onClick = { onThreadClick(thread) })
+                    items(threads, key = { it.threadId }) { thread ->
+                        ThreadItem(
+                            thread, 
+                            onClick = { onThreadClick(thread) },
+                            onDelete = { threadToDelete = thread }
+                        )
                         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                     }
                 }
             }
         }
     }
+
+    if (threadToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { threadToDelete = null },
+            title = { Text("Delete Conversation?") },
+            text = { Text("Are you sure you want to delete the conversation with ${threadToDelete?.contactName ?: threadToDelete?.address}?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteThread(threadToDelete!!.threadId)
+                    threadToDelete = null
+                }) {
+                    Text("Delete", color = Color.Red)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { threadToDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
-fun ThreadItem(thread: MessageThread, onClick: () -> Unit) {
+fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit) {
+    val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -296,17 +339,33 @@ fun ThreadItem(thread: MessageThread, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = thread.contactName ?: thread.address,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = if (!thread.read) FontWeight.Bold else FontWeight.Normal
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = thread.contactName ?: thread.address,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = if (!thread.read) FontWeight.Bold else FontWeight.Normal,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = timeFormat.format(Date(thread.date)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
             Text(
                 text = thread.snippet,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = if (!thread.read) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        
+        IconButton(onClick = onDelete) {
+            Icon(
+                Icons.Default.Delete, 
+                contentDescription = "Delete Thread",
+                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
             )
         }
     }
@@ -451,19 +510,38 @@ fun ChatScreen(threadId: String, contactName: String, address: String, refreshTr
 @Composable
 fun MessageBubble(message: ChatMessage) {
     val alignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
-    val color = if (message.isMe) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer
-    val textColor = if (message.isMe) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer
+    val color = if (message.isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
+    val textColor = if (message.isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
+    val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     
+    val bubbleShape = if (message.isMe) {
+        RoundedCornerShape(16.dp, 16.dp, 2.dp, 16.dp)
+    } else {
+        RoundedCornerShape(16.dp, 16.dp, 16.dp, 2.dp)
+    }
+
     Box(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = alignment) {
-        Surface(
-            color = color,
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Text(
-                text = message.body,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                color = textColor
-            )
+        Column(horizontalAlignment = if (message.isMe) Alignment.End else Alignment.Start) {
+            Surface(
+                color = color,
+                shape = bubbleShape,
+                shadowElevation = 1.dp
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Text(
+                        text = message.body,
+                        color = textColor,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = timeFormat.format(Date(message.date)),
+                        color = textColor.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
+                        fontSize = 10.sp
+                    )
+                }
+            }
         }
     }
 }
@@ -742,6 +820,16 @@ private suspend fun markThreadAsRead(context: Context, threadId: String) = withC
         Log.d("SMSBlocker", "Thread $threadId marked as read (Success: $isDefault)")
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to mark thread as read", e)
+    }
+}
+
+private suspend fun deleteThread(context: Context, threadId: String) = withContext(Dispatchers.IO) {
+    try {
+        val uri = "content://mms-sms/conversations/$threadId".toUri()
+        context.contentResolver.delete(uri, null, null)
+        Log.d("SMSBlocker", "Thread $threadId deleted")
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to delete thread", e)
     }
 }
 
