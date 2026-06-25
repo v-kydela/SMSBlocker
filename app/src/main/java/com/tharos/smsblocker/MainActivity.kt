@@ -23,6 +23,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,9 +40,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,6 +55,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -62,6 +68,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -83,6 +90,7 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.core.content.edit
 
 data class MessageThread(
     val threadId: String,
@@ -546,10 +554,12 @@ fun MessageBubble(message: ChatMessage) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val packageName = context.packageName
+    val prefs = remember { context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE) }
     
     var isDefaultSmsApp by remember {
         mutableStateOf(Telephony.Sms.getDefaultSmsPackage(context) == packageName)
@@ -563,6 +573,12 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
         )
     }
 
+    val keywords = remember { 
+        val saved = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
+        mutableStateListOf<String>().apply { addAll(saved) }
+    }
+    var newKeyword by remember { mutableStateOf("") }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -575,44 +591,99 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
         isDefaultSmsApp = Telephony.Sms.getDefaultSmsPackage(context) == packageName
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Blocker Settings", style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        StatusRow(label = "Permissions", status = hasPermission)
-        StatusRow(label = "Default SMS App", status = isDefaultSmsApp)
-        
-        Button(onClick = {
-            permissionLauncher.launch(arrayOf(
-                Manifest.permission.RECEIVE_SMS,
-                Manifest.permission.READ_SMS,
-                Manifest.permission.SEND_SMS,
-                Manifest.permission.RECEIVE_MMS,
-                Manifest.permission.READ_CONTACTS,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) 
-                    Manifest.permission.POST_NOTIFICATIONS else Manifest.permission.RECEIVE_SMS
-            ))
-        }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
-            Text("Grant Permissions")
-        }
-
-        if (!isDefaultSmsApp) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        item {
+            Text("Blocker Settings", style = MaterialTheme.typography.headlineMedium)
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            StatusRow(label = "Permissions", status = hasPermission)
+            StatusRow(label = "Default SMS App", status = isDefaultSmsApp)
+            
             Button(onClick = {
-                val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
-                    putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                permissionLauncher.launch(arrayOf(
+                    Manifest.permission.RECEIVE_SMS,
+                    Manifest.permission.READ_SMS,
+                    Manifest.permission.SEND_SMS,
+                    Manifest.permission.RECEIVE_MMS,
+                    Manifest.permission.READ_CONTACTS,
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) 
+                        Manifest.permission.POST_NOTIFICATIONS else Manifest.permission.RECEIVE_SMS
+                ))
+            }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
+                Text("Grant Permissions")
+            }
+
+            if (!isDefaultSmsApp) {
+                Button(onClick = {
+                    val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                        putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                    }
+                    defaultAppLauncher.launch(intent)
+                }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Text("Set as Default SMS App")
                 }
-                defaultAppLauncher.launch(intent)
-            }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                Text("Set as Default SMS App")
+            }
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
+            
+            Text("Blocking Keywords", style = MaterialTheme.typography.titleLarge)
+            Text("Messages containing these words will be blocked", style = MaterialTheme.typography.bodySmall)
+            
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = newKeyword,
+                    onValueChange = { newKeyword = it },
+                    label = { Text("Add keyword") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(
+                    onClick = {
+                        if (newKeyword.isNotBlank() && !keywords.contains(newKeyword)) {
+                            keywords.add(newKeyword)
+                            prefs.edit { putStringSet("keywords", keywords.toSet()) }
+                            newKeyword = ""
+                        }
+                    },
+                    enabled = newKeyword.isNotBlank()
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Add")
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+            ) {
+                keywords.forEach { keyword ->
+                    AssistChip(
+                        onClick = { },
+                        label = { Text(keyword) },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Remove",
+                                modifier = Modifier.clickable {
+                                    keywords.remove(keyword)
+                                    prefs.edit { putStringSet("keywords", keywords.toSet()) }
+                                }.padding(4.dp)
+                            )
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            labelColor = MaterialTheme.colorScheme.error
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                Text("Back to Messages")
             }
         }
-
-        Button(onClick = onBack, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
-            Text("Back to Messages")
-        }
-        
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("Blocking Keyword: 'Stop2End'", color = Color.Red)
     }
 }
 

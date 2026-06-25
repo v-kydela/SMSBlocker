@@ -25,7 +25,11 @@ class SmsReceiver : BroadcastReceiver() {
                 
                 Log.d("SmsReceiver", "Intercepted SMS from $sender: $body")
                 
-                if (body.contains("Stop2End", ignoreCase = true)) {
+                val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+                val keywords = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
+                val isSpam = keywords.any { body.contains(it, ignoreCase = true) }
+
+                if (isSpam) {
                     Log.d("SmsReceiver", "Spam keyword detected! Blocking.")
                     blockSender(context, sender)
                     
