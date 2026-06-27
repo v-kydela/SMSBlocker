@@ -42,12 +42,14 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.SearchBar
+import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -266,47 +268,117 @@ fun ConversationListScreen(
     onDeleteThread: (String) -> Unit
 ) {
     var threadToDelete by remember { mutableStateOf<MessageThread?>(null) }
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearchActive by remember { mutableStateOf(false) }
+
+    val filteredThreads = remember(threads, searchQuery) {
+        if (searchQuery.isBlank()) {
+            threads
+        } else {
+            threads.filter { thread ->
+                (thread.contactName?.contains(searchQuery, ignoreCase = true) ?: false) ||
+                thread.address.contains(searchQuery, ignoreCase = true) ||
+                thread.snippet.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
 
     Scaffold(
         floatingActionButton = {
-            FloatingActionButton(onClick = onNewChat) {
-                Icon(Icons.Default.Add, contentDescription = "New Message")
+            if (!isSearchActive) {
+                FloatingActionButton(onClick = onNewChat) {
+                    Icon(Icons.Default.Add, contentDescription = "New Message")
+                }
             }
         }
     ) { p ->
         Column(modifier = Modifier.fillMaxSize().padding(p)) {
-            CenterAlignedTopAppBar(
-                title = { Text("Messages") },
-                actions = {
-                    IconButton(onClick = onSettingsClick) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
-                    }
-                }
-            )
-
-            if (!hasPermissions) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Button(onClick = onSettingsClick) {
-                        Text("Grant Permissions in Settings")
-                    }
-                }
-            } else if (isLoading) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-            } else if (threads.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No messages found", style = MaterialTheme.typography.bodyLarge)
-                }
-            } else {
-                LazyColumn {
-                    items(threads, key = { it.threadId }) { thread ->
-                        ThreadItem(
-                            thread, 
-                            onClick = { onThreadClick(thread) },
-                            onDelete = { threadToDelete = thread }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                SearchBar(
+                    inputField = {
+                        SearchBarDefaults.InputField(
+                            query = searchQuery,
+                            onQueryChange = { searchQuery = it },
+                            onSearch = { isSearchActive = false },
+                            expanded = isSearchActive,
+                            onExpandedChange = { isSearchActive = it },
+                            placeholder = { Text("Search messages...") },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            trailingIcon = {
+                                if (isSearchActive || searchQuery.isNotEmpty()) {
+                                    IconButton(onClick = {
+                                        if (searchQuery.isNotEmpty()) {
+                                            searchQuery = ""
+                                        } else {
+                                            isSearchActive = false
+                                        }
+                                    }) {
+                                        Icon(Icons.Default.Close, contentDescription = "Clear search")
+                                    }
+                                } else {
+                                    IconButton(onClick = onSettingsClick) {
+                                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                    }
+                                }
+                            }
                         )
-                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                    },
+                    expanded = isSearchActive,
+                    onExpandedChange = { isSearchActive = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = SearchBarDefaults.colors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    )
+                ) {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        items(filteredThreads, key = { it.threadId }) { thread ->
+                            ThreadItem(
+                                thread,
+                                onClick = {
+                                    isSearchActive = false
+                                    onThreadClick(thread)
+                                },
+                                onDelete = { threadToDelete = thread }
+                            )
+                            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                        }
+                    }
+                }
+            }
+
+            if (!isSearchActive) {
+                if (!hasPermissions) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Button(onClick = onSettingsClick) {
+                            Text("Grant Permissions in Settings")
+                        }
+                    }
+                } else if (isLoading) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                } else if (threads.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No messages found", style = MaterialTheme.typography.bodyLarge)
+                    }
+                } else if (filteredThreads.isEmpty() && searchQuery.isNotEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No results for '$searchQuery'", style = MaterialTheme.typography.bodyLarge)
+                    }
+                } else {
+                    LazyColumn {
+                        items(filteredThreads, key = { it.threadId }) { thread ->
+                            ThreadItem(
+                                thread, 
+                                onClick = { onThreadClick(thread) },
+                                onDelete = { threadToDelete = thread }
+                            )
+                            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                        }
                     }
                 }
             }
