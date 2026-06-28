@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -77,7 +78,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -85,6 +88,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import coil.compose.AsyncImage
 import com.tharos.smsblocker.ui.theme.SMSBlockerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -107,8 +111,11 @@ data class ChatMessage(
     val id: String,
     val body: String,
     val date: Long,
-    val isMe: Boolean
+    val isMe: Boolean,
+    val imageUri: Uri? = null
 )
+
+data class MmsData(val text: String, val imageUri: Uri?)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -608,11 +615,24 @@ fun MessageBubble(message: ChatMessage) {
                 shadowElevation = 1.dp
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                    Text(
-                        text = message.body,
-                        color = textColor,
-                        style = MaterialTheme.typography.bodyLarge
-                    )
+                    if (message.imageUri != null) {
+                        AsyncImage(
+                            model = message.imageUri,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .padding(bottom = 4.dp)
+                                .sizeIn(maxWidth = 240.dp, maxHeight = 320.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                    if (message.body.isNotBlank()) {
+                        Text(
+                            text = message.body,
+                            color = textColor,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
                     Text(
                         text = timeFormat.format(Date(message.date)),
                         color = textColor.copy(alpha = 0.7f),
@@ -894,13 +914,14 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
             val date = cursor.getLong(dateIdx) * 1000 
             val isMe = cursor.getInt(boxIdx) == Telephony.Mms.MESSAGE_BOX_SENT
             
-            val body = fetchMmsText(contentResolver, mmsId)
-            if (body.isNotBlank()) {
+            val mmsData = fetchMmsData(contentResolver, mmsId)
+            if (mmsData.text.isNotBlank() || mmsData.imageUri != null) {
                 messages.add(ChatMessage(
                     id = "mms_$mmsId",
-                    body = body,
+                    body = mmsData.text,
                     date = date,
-                    isMe = isMe
+                    isMe = isMe,
+                    imageUri = mmsData.imageUri
                 ))
             }
         }
@@ -909,28 +930,33 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
     messages.sortedBy { it.date }
 }
 
-private fun fetchMmsText(contentResolver: ContentResolver, mmsId: String): String {
+private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsData {
     val selection = "mid = ?"
     val selectionArgs = arrayOf(mmsId)
     val uri = "content://mms/part".toUri()
-    val sb = StringBuilder()
+    var text = ""
+    var imageUri: Uri? = null
     
     try {
         contentResolver.query(uri, null, selection, selectionArgs, null)?.use { cursor ->
             val ctIdx = cursor.getColumnIndex("ct")
             val textIdx = cursor.getColumnIndex("text")
+            val idIdx = cursor.getColumnIndex("_id")
             
             while (cursor.moveToNext()) {
                 val ct = cursor.getString(ctIdx)
                 if (ct == "text/plain") {
-                    sb.append(cursor.getString(textIdx) ?: "")
+                    text += (cursor.getString(textIdx) ?: "")
+                } else if (ct != null && ct.startsWith("image/")) {
+                    val partId = cursor.getString(idIdx)
+                    imageUri = "content://mms/part/$partId".toUri()
                 }
             }
         }
     } catch (e: Exception) {
-        Log.e("SMSBlocker", "Error fetching MMS text", e)
+        Log.e("SMSBlocker", "Error fetching MMS data", e)
     }
-    return sb.toString()
+    return MmsData(text, imageUri)
 }
 
 private suspend fun markThreadAsRead(context: Context, threadId: String) = withContext(Dispatchers.IO) {
