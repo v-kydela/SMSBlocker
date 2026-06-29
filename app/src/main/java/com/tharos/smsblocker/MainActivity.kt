@@ -527,9 +527,6 @@ fun ChatScreen(threadId: String, contactName: String, address: String, refreshTr
                 markThreadAsRead(context, currentThreadId)
             }
             messages = fetchMessagesForThread(context, currentThreadId)
-            if (messages.isNotEmpty()) {
-                listState.animateScrollToItem(messages.size - 1)
-            }
         }
     }
 
@@ -545,9 +542,10 @@ fun ChatScreen(threadId: String, contactName: String, address: String, refreshTr
 
         LazyColumn(
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            state = listState
+            state = listState,
+            reverseLayout = true
         ) {
-            items(messages) { message ->
+            items(messages.asReversed()) { message ->
                 MessageBubble(message)
             }
         }
