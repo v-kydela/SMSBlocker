@@ -801,11 +801,15 @@ private suspend fun fetchBaseThreads(context: Context): List<MessageThread> = wi
             
             while (c.moveToNext()) {
                 val threadId = c.getString(idIdx) ?: continue
-                val snippet = c.getString(snippetIdx) ?: ""
+                var snippet = c.getString(snippetIdx) ?: ""
                 val date = c.getLong(dateIdx)
                 val read = c.getInt(readIdx) == 1
                 val recipientIds = c.getString(recipientIdsIdx) ?: ""
                 
+                if (snippet.isBlank()) {
+                    snippet = fetchFallbackSnippet(contentResolver, threadId)
+                }
+
                 val firstId = recipientIds.split(" ").firstOrNull() ?: ""
                 if (firstId.isNotBlank()) recipientIdSet.add(firstId)
                 
@@ -837,6 +841,53 @@ private suspend fun fetchBaseThreads(context: Context): List<MessageThread> = wi
     }
 
     threads
+}
+
+private fun fetchFallbackSnippet(contentResolver: ContentResolver, threadId: String): String {
+    try {
+        val smsCursor = contentResolver.query(
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(Telephony.Sms.BODY, Telephony.Sms.DATE),
+            "${Telephony.Sms.THREAD_ID} = ?",
+            arrayOf(threadId),
+            "date DESC LIMIT 1"
+        )
+        var smsBody = ""
+        var smsDate = 0L
+        smsCursor?.use {
+            if (it.moveToFirst()) {
+                smsBody = it.getString(0) ?: ""
+                smsDate = it.getLong(1)
+            }
+        }
+
+        val mmsCursor = contentResolver.query(
+            Telephony.Mms.CONTENT_URI,
+            arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE),
+            "${Telephony.Mms.THREAD_ID} = ?",
+            arrayOf(threadId),
+            "date DESC LIMIT 1"
+        )
+        var mmsId: String? = null
+        var mmsDate = 0L
+        mmsCursor?.use {
+            if (it.moveToFirst()) {
+                mmsId = it.getString(0)
+                mmsDate = it.getLong(1) * 1000
+            }
+        }
+
+        return if (mmsId != null && mmsDate > smsDate) {
+            val data = fetchMmsData(contentResolver, mmsId)
+            if (data.text.isNotBlank()) data.text 
+            else if (data.imageUri != null) "Multimedia message" 
+            else smsBody
+        } else {
+            smsBody
+        }
+    } catch (_: Exception) {
+        return ""
+    }
 }
 
 private suspend fun resolveThreadNames(context: Context, threads: List<MessageThread>): List<MessageThread> = withContext(Dispatchers.IO) {
