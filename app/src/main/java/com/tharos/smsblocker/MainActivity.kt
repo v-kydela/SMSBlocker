@@ -159,7 +159,7 @@ fun MainNavigation() {
                                 ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
 
     // Cache threads at the navigation level to avoid re-loading when returning from chat
-    var threads by remember { mutableStateOf<List<MessageThread>>(emptyList()) }
+    var threads by remember { mutableStateOf(loadThreadsFromCache(context)) }
     var isLoading by remember { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
 
@@ -194,16 +194,23 @@ fun MainNavigation() {
         if (hasRequiredPermissions && currentScreen == "threads") {
             if (threads.isEmpty()) isLoading = true
             
-            // Phase 1: Fetch everything needed for the UI (Names from cache + Previews)
-            // Now optimized with parallel fallback queries to stay fast
-            val baseThreads = fetchBaseThreads(context, contactCache)
+            // Phase 1: Fast Fetch (Basic thread info + Addresses only)
+            // This returns almost instantly.
+            val baseThreads = fetchThreadsFast(context, contactCache)
             threads = baseThreads
             isLoading = false
             
-            // Phase 2: Background refresh for contact names only
+            // Phase 2: Background Deep Sync (Snippets + Contact Names)
+            // This runs while the user is already looking at the list.
             scope.launch {
-                val updated = resolveThreadDetails(context, baseThreads)
-                threads = updated
+                val updatedWithSnippets = resolveMissingSnippets(context, baseThreads)
+                threads = updatedWithSnippets
+                
+                val finalThreads = resolveThreadDetails(context, updatedWithSnippets)
+                threads = finalThreads
+                
+                // Save to cache for next app launch
+                saveThreadsToCache(context, finalThreads)
                 contactCache = contactPrefs.all.mapValues { it.value.toString() }
             }
         }
@@ -792,11 +799,32 @@ fun StatusRow(label: String, status: Boolean) {
     Text("$label: ${if (status) "✅" else "❌"}")
 }
 
-private suspend fun fetchBaseThreads(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
+private fun saveThreadsToCache(context: Context, threads: List<MessageThread>) {
+    val prefs = context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE)
+    val serialized = threads.take(20).joinToString("||") { 
+        "${it.threadId}|${it.address}|${it.contactName ?: ""}|${it.snippet.replace("\n", " ")}|${it.date}|${it.read}" 
+    }
+    prefs.edit { putString("cached_list", serialized) }
+}
+
+private fun loadThreadsFromCache(context: Context): List<MessageThread> {
+    val prefs = context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE)
+    val serialized = prefs.getString("cached_list", null) ?: return emptyList()
+    return try {
+        serialized.split("||").map {
+            val parts = it.split("|")
+            MessageThread(parts[0], parts[1], parts[2].ifBlank { null }, parts[3], parts[4].toLong(), parts[5].toBoolean())
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
     val uri = "content://mms-sms/conversations?simple=true".toUri()
     val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids")
-    val sortOrder = "date DESC LIMIT 50"
+    val sortOrder = "date DESC LIMIT 30" // Reduced limit for even faster initial snap
 
     val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
@@ -828,7 +856,6 @@ private suspend fun fetchBaseThreads(context: Context, contactCache: Map<String,
 
     if (baseThreads.isEmpty()) return@withContext emptyList()
 
-    // Bulk fetch required canonical addresses
     val addrMap = mutableMapOf<String, String>()
     if (recipientIdSet.isNotEmpty()) {
         val selection = "_id IN (${recipientIdSet.joinToString(",")})"
@@ -845,21 +872,24 @@ private suspend fun fetchBaseThreads(context: Context, contactCache: Map<String,
         }
     }
 
-    // Process fallbacks and mapping in parallel to maximize speed
+    return@withContext baseThreads.map { thread ->
+        val addr = addrMap[thread.address] ?: "Unknown"
+        val normalized = addr.replace(Regex("[^0-9+]"), "")
+        thread.copy(
+            address = addr,
+            contactName = contactCache[normalized]
+        )
+    }
+}
+
+private suspend fun resolveMissingSnippets(context: Context, threads: List<MessageThread>): List<MessageThread> = withContext(Dispatchers.IO) {
+    val contentResolver = context.contentResolver
     return@withContext kotlinx.coroutines.coroutineScope {
-        baseThreads.map { thread ->
+        threads.map { thread ->
             async {
-                var snippet = thread.snippet
-                if (snippet.isBlank()) {
-                    snippet = fetchFallbackSnippet(contentResolver, thread.threadId)
-                }
-                val addr = addrMap[thread.address] ?: "Unknown"
-                val normalized = addr.replace(Regex("[^0-9+]"), "")
-                thread.copy(
-                    address = addr,
-                    contactName = contactCache[normalized],
-                    snippet = snippet
-                )
+                if (thread.snippet.isBlank()) {
+                    thread.copy(snippet = fetchFallbackSnippet(contentResolver, thread.threadId))
+                } else thread
             }
         }.awaitAll()
     }
