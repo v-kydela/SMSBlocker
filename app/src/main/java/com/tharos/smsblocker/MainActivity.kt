@@ -91,6 +91,8 @@ import androidx.core.net.toUri
 import coil.compose.AsyncImage
 import com.tharos.smsblocker.ui.theme.SMSBlockerTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -161,6 +163,11 @@ fun MainNavigation() {
     var isLoading by remember { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
 
+    val contactPrefs = remember { context.getSharedPreferences("contact_names", Context.MODE_PRIVATE) }
+    var contactCache by remember { 
+        mutableStateOf(contactPrefs.all.mapValues { it.value.toString() }) 
+    }
+
     // Register a ContentObserver to listen for SMS database changes
     val observer = remember {
         object : android.database.ContentObserver(null) {
@@ -187,14 +194,17 @@ fun MainNavigation() {
         if (hasRequiredPermissions && currentScreen == "threads") {
             if (threads.isEmpty()) isLoading = true
             
-            // Phase 1: Quick fetch of threads and addresses
-            val baseThreads = fetchBaseThreads(context)
+            // Phase 1: Fetch everything needed for the UI (Names from cache + Previews)
+            // Now optimized with parallel fallback queries to stay fast
+            val baseThreads = fetchBaseThreads(context, contactCache)
             threads = baseThreads
             isLoading = false
             
-            // Phase 2: Resolve contact names in background
-            if (baseThreads.isNotEmpty()) {
-                threads = resolveThreadNames(context, baseThreads)
+            // Phase 2: Background refresh for contact names only
+            scope.launch {
+                val updated = resolveThreadDetails(context, baseThreads)
+                threads = updated
+                contactCache = contactPrefs.all.mapValues { it.value.toString() }
             }
         }
     }
@@ -782,13 +792,13 @@ fun StatusRow(label: String, status: Boolean) {
     Text("$label: ${if (status) "✅" else "❌"}")
 }
 
-private suspend fun fetchBaseThreads(context: Context): List<MessageThread> = withContext(Dispatchers.IO) {
+private suspend fun fetchBaseThreads(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
     val uri = "content://mms-sms/conversations?simple=true".toUri()
     val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids")
     val sortOrder = "date DESC LIMIT 50"
 
-    val threads = mutableListOf<MessageThread>()
+    val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
 
     try {
@@ -801,29 +811,26 @@ private suspend fun fetchBaseThreads(context: Context): List<MessageThread> = wi
             
             while (c.moveToNext()) {
                 val threadId = c.getString(idIdx) ?: continue
-                var snippet = c.getString(snippetIdx) ?: ""
+                val snippet = c.getString(snippetIdx) ?: ""
                 val date = c.getLong(dateIdx)
                 val read = c.getInt(readIdx) == 1
                 val recipientIds = c.getString(recipientIdsIdx) ?: ""
                 
-                if (snippet.isBlank()) {
-                    snippet = fetchFallbackSnippet(contentResolver, threadId)
-                }
-
                 val firstId = recipientIds.split(" ").firstOrNull() ?: ""
                 if (firstId.isNotBlank()) recipientIdSet.add(firstId)
                 
-                // Store recipientId in address field temporarily for resolution
-                threads.add(MessageThread(threadId, firstId, null, snippet, date, read))
+                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read))
             }
         }
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to query conversations", e)
     }
 
-    // Bulk fetch ONLY the required canonical addresses
+    if (baseThreads.isEmpty()) return@withContext emptyList()
+
+    // Bulk fetch required canonical addresses
+    val addrMap = mutableMapOf<String, String>()
     if (recipientIdSet.isNotEmpty()) {
-        val addrMap = mutableMapOf<String, String>()
         val selection = "_id IN (${recipientIdSet.joinToString(",")})"
         try {
             contentResolver.query("content://mms-sms/canonical-addresses".toUri(), arrayOf("_id", "address"), selection, null, null)?.use { c ->
@@ -834,13 +841,28 @@ private suspend fun fetchBaseThreads(context: Context): List<MessageThread> = wi
                 }
             }
         } catch (e: Exception) {
-            Log.e("SMSBlocker", "Error fetching canonical addresses", e)
+            Log.e("SMSBlocker", "Error fetching addresses", e)
         }
-        
-        return@withContext threads.map { it.copy(address = addrMap[it.address] ?: "Unknown") }
     }
 
-    threads
+    // Process fallbacks and mapping in parallel to maximize speed
+    return@withContext kotlinx.coroutines.coroutineScope {
+        baseThreads.map { thread ->
+            async {
+                var snippet = thread.snippet
+                if (snippet.isBlank()) {
+                    snippet = fetchFallbackSnippet(contentResolver, thread.threadId)
+                }
+                val addr = addrMap[thread.address] ?: "Unknown"
+                val normalized = addr.replace(Regex("[^0-9+]"), "")
+                thread.copy(
+                    address = addr,
+                    contactName = contactCache[normalized],
+                    snippet = snippet
+                )
+            }
+        }.awaitAll()
+    }
 }
 
 private fun fetchFallbackSnippet(contentResolver: ContentResolver, threadId: String): String {
@@ -890,30 +912,36 @@ private fun fetchFallbackSnippet(contentResolver: ContentResolver, threadId: Str
     }
 }
 
-private suspend fun resolveThreadNames(context: Context, threads: List<MessageThread>): List<MessageThread> = withContext(Dispatchers.IO) {
+private suspend fun resolveThreadDetails(context: Context, threads: List<MessageThread>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver = context.contentResolver
     val uniqueAddresses = threads.map { it.address }.filter { it != "Unknown" }.distinct()
-    if (uniqueAddresses.isEmpty()) return@withContext threads
-
-    // Optimized: Fetch all relevant contacts in one pass instead of 50 separate queries
-    val contactMap = mutableMapOf<String, String>()
-    val contactUri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
-    val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
     
-    try {
-        contentResolver.query(contactUri, projection, null, null, null)?.use { cursor ->
-            val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-            val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
-            while (cursor.moveToNext()) {
-                val number = cursor.getString(numIdx)?.replace(Regex("[^0-9+]"), "") ?: continue
-                val name = cursor.getString(nameIdx) ?: continue
-                contactMap[number] = name
+    // 1. Bulk resolve contact names
+    val contactMap = mutableMapOf<String, String>()
+    if (uniqueAddresses.isNotEmpty()) {
+        val contactUri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+        val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+        try {
+            contentResolver.query(contactUri, projection, null, null, null)?.use { cursor ->
+                val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                while (cursor.moveToNext()) {
+                    val number = cursor.getString(numIdx)?.replace(Regex("[^0-9+]"), "") ?: continue
+                    val name = cursor.getString(nameIdx) ?: continue
+                    contactMap[number] = name
+                }
             }
+        } catch (e: Exception) {
+            Log.e("SMSBlocker", "Error fetching contacts bulk", e)
         }
-    } catch (e: Exception) {
-        Log.e("SMSBlocker", "Error fetching contacts bulk", e)
+
+        // Update persistent cache
+        context.getSharedPreferences("contact_names", Context.MODE_PRIVATE).edit {
+            contactMap.forEach { (num, name) -> putString(num, name) }
+        }
     }
 
+    // 2. Resolve missing snippets and apply names
     threads.map { thread ->
         val normalized = thread.address.replace(Regex("[^0-9+]"), "")
         val name = contactMap[normalized] ?: fetchContactName(contentResolver, thread.address)
