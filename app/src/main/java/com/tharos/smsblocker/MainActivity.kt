@@ -152,6 +152,7 @@ fun MainNavigation() {
     var selectedThreadId by remember { mutableStateOf<String?>(null) }
     var selectedContactName by remember { mutableStateOf<String?>(null) }
     var selectedAddress by remember { mutableStateOf<String?>(null) }
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
     
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -216,66 +217,78 @@ fun MainNavigation() {
         }
     }
 
-    BackHandler(enabled = currentScreen != "threads") {
-        currentScreen = "threads"
+    BackHandler(enabled = currentScreen != "threads" || selectedImageUri != null) {
+        if (selectedImageUri != null) {
+            selectedImageUri = null
+        } else {
+            currentScreen = "threads"
+        }
     }
 
-    Scaffold { padding ->
-        Box(modifier = Modifier.padding(padding)) {
-            when (currentScreen) {
-                "threads" -> ConversationListScreen(
-                    threads = threads,
-                    isLoading = isLoading,
-                    hasPermissions = hasRequiredPermissions,
-                    onSettingsClick = { currentScreen = "settings" },
-                    onThreadClick = { thread -> 
-                        selectedThreadId = thread.threadId
-                        selectedContactName = thread.contactName ?: thread.address
-                        selectedAddress = thread.address
-                        currentScreen = "chat"
-                        
-                        // Mark as read in DB and update local state
-                        if (!thread.read) {
-                            scope.launch {
-                                markThreadAsRead(context, thread.threadId)
-                                threads = threads.map { 
-                                    if (it.threadId == thread.threadId) it.copy(read = true) else it 
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold { padding ->
+            Box(modifier = Modifier.padding(padding)) {
+                when (currentScreen) {
+                    "threads" -> ConversationListScreen(
+                        threads = threads,
+                        isLoading = isLoading,
+                        hasPermissions = hasRequiredPermissions,
+                        onSettingsClick = { currentScreen = "settings" },
+                        onThreadClick = { thread -> 
+                            selectedThreadId = thread.threadId
+                            selectedContactName = thread.contactName ?: thread.address
+                            selectedAddress = thread.address
+                            currentScreen = "chat"
+                            
+                            // Mark as read in DB and update local state
+                            if (!thread.read) {
+                                scope.launch {
+                                    markThreadAsRead(context, thread.threadId)
+                                    threads = threads.map { 
+                                        if (it.threadId == thread.threadId) it.copy(read = true) else it 
+                                    }
                                 }
                             }
+                        },
+                        onNewChat = { currentScreen = "new_chat" },
+                        onDeleteThread = { threadId ->
+                            scope.launch {
+                                deleteThread(context, threadId)
+                                threads = threads.filter { it.threadId != threadId }
+                            }
                         }
-                    },
-                    onNewChat = { currentScreen = "new_chat" },
-                    onDeleteThread = { threadId ->
-                        scope.launch {
-                            deleteThread(context, threadId)
-                            threads = threads.filter { it.threadId != threadId }
+                    )
+                    "chat" -> ChatScreen(
+                        threadId = selectedThreadId!!,
+                        contactName = selectedContactName ?: "Unknown",
+                        address = selectedAddress!!,
+                        refreshTrigger = refreshTrigger,
+                        onBack = { currentScreen = "threads" },
+                        onImageClick = { selectedImageUri = it }
+                    )
+                    "new_chat" -> NewChatScreen(
+                        onBack = { currentScreen = "threads" },
+                        onStartChat = { address ->
+                            selectedAddress = address
+                            selectedContactName = null
+                            currentScreen = "chat_by_address"
                         }
-                    }
-                )
-                "chat" -> ChatScreen(
-                    threadId = selectedThreadId!!,
-                    contactName = selectedContactName ?: "Unknown",
-                    address = selectedAddress!!,
-                    refreshTrigger = refreshTrigger,
-                    onBack = { currentScreen = "threads" }
-                )
-                "new_chat" -> NewChatScreen(
-                    onBack = { currentScreen = "threads" },
-                    onStartChat = { address ->
-                        selectedAddress = address
-                        selectedContactName = null
-                        currentScreen = "chat_by_address"
-                    }
-                )
-                "chat_by_address" -> ChatByAddressScreen(
-                    address = selectedAddress!!,
-                    refreshTrigger = refreshTrigger,
-                    onBack = { currentScreen = "threads" }
-                )
-                "settings" -> SmsBlockerSettingsScreen(
-                    onBack = { currentScreen = "threads" }
-                )
+                    )
+                    "chat_by_address" -> ChatByAddressScreen(
+                        address = selectedAddress!!,
+                        refreshTrigger = refreshTrigger,
+                        onBack = { currentScreen = "threads" },
+                        onImageClick = { selectedImageUri = it }
+                    )
+                    "settings" -> SmsBlockerSettingsScreen(
+                        onBack = { currentScreen = "threads" }
+                    )
+                }
             }
+        }
+
+        selectedImageUri?.let { uri ->
+            FullScreenImage(uri = uri, onDismiss = { selectedImageUri = null })
         }
     }
 }
@@ -511,7 +524,7 @@ fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
 }
 
 @Composable
-fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> Unit) {
+fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> Unit, onImageClick: (Uri) -> Unit) {
     val context = LocalContext.current
     var threadId by remember { mutableStateOf<String?>(null) }
     var contactName by remember { mutableStateOf(address) }
@@ -522,15 +535,15 @@ fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> 
     }
 
     if (threadId != null) {
-        ChatScreen(threadId = threadId!!, contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack)
+        ChatScreen(threadId = threadId!!, contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack, onImageClick = onImageClick)
     } else {
-        ChatScreen(threadId = "-1", contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack)
+        ChatScreen(threadId = "-1", contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack, onImageClick = onImageClick)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(threadId: String, contactName: String, address: String, refreshTrigger: Int = 0, onBack: () -> Unit) {
+fun ChatScreen(threadId: String, contactName: String, address: String, refreshTrigger: Int = 0, onBack: () -> Unit, onImageClick: (Uri) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
@@ -563,7 +576,7 @@ fun ChatScreen(threadId: String, contactName: String, address: String, refreshTr
             reverseLayout = true
         ) {
             items(messages.asReversed()) { message ->
-                MessageBubble(message)
+                MessageBubble(message, onImageClick = onImageClick)
             }
         }
 
@@ -610,7 +623,7 @@ fun ChatScreen(threadId: String, contactName: String, address: String, refreshTr
 }
 
 @Composable
-fun MessageBubble(message: ChatMessage) {
+fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
     val alignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
     val color = if (message.isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
     val textColor = if (message.isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
@@ -637,7 +650,8 @@ fun MessageBubble(message: ChatMessage) {
                             modifier = Modifier
                                 .padding(bottom = 4.dp)
                                 .sizeIn(maxWidth = 240.dp, maxHeight = 320.dp)
-                                .clip(RoundedCornerShape(8.dp)),
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onImageClick(message.imageUri) },
                             contentScale = ContentScale.Fit
                         )
                     }
@@ -1158,5 +1172,31 @@ private fun fetchContactName(contentResolver: ContentResolver, phoneNumber: Stri
         }
     } catch (_: Exception) {
         null
+    }
+}
+
+@Composable
+fun FullScreenImage(uri: Uri, onDismiss: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Color.Black.copy(alpha = 0.9f)
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().clickable { onDismiss() },
+            contentAlignment = Alignment.Center
+        ) {
+            AsyncImage(
+                model = uri,
+                contentDescription = "Full Screen Image",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+            }
+        }
     }
 }
