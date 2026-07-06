@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Parcelable
 import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
@@ -78,6 +79,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -105,7 +107,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.core.content.edit
+import kotlinx.parcelize.Parcelize
 
+@Parcelize
 data class MessageThread(
     val threadId: String,
     val address: String,
@@ -113,17 +117,19 @@ data class MessageThread(
     val snippet: String,
     val date: Long,
     val read: Boolean
-)
+) : Parcelable
 
+@Parcelize
 data class ChatMessage(
     val id: String,
     val body: String,
     val date: Long,
     val isMe: Boolean,
     val imageUri: Uri? = null
-)
+) : Parcelable
 
-data class MmsData(val text: String, val imageUri: Uri?)
+@Parcelize
+data class MmsData(val text: String, val imageUri: Uri?) : Parcelable
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -154,11 +160,11 @@ fun createNotificationChannel(context: Context) {
 
 @Composable
 fun MainNavigation() {
-    var currentScreen by remember { mutableStateOf("threads") }
-    var selectedThreadId by remember { mutableStateOf<String?>(null) }
-    var selectedContactName by remember { mutableStateOf<String?>(null) }
-    var selectedAddress by remember { mutableStateOf<String?>(null) }
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var currentScreen by rememberSaveable { mutableStateOf("threads") }
+    var selectedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedContactName by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedAddress by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -166,9 +172,9 @@ fun MainNavigation() {
                                 ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
 
     // Cache threads at the navigation level to avoid re-loading when returning from chat
-    var threads by remember { mutableStateOf(loadThreadsFromCache(context)) }
-    var isLoading by remember { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
-    var refreshTrigger by remember { mutableIntStateOf(0) }
+    var threads by rememberSaveable { mutableStateOf(loadThreadsFromCache(context)) }
+    var isLoading by rememberSaveable { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
+    var refreshTrigger by rememberSaveable { mutableIntStateOf(0) }
 
     val contactPrefs = remember { context.getSharedPreferences("contact_names", Context.MODE_PRIVATE) }
     var contactCache by remember { 
@@ -310,9 +316,9 @@ fun ConversationListScreen(
     onNewChat: () -> Unit,
     onDeleteThread: (String) -> Unit
 ) {
-    var threadToDelete by remember { mutableStateOf<MessageThread?>(null) }
-    var searchQuery by remember { mutableStateOf("") }
-    var isSearchActive by remember { mutableStateOf(false) }
+    var threadToDelete by rememberSaveable { mutableStateOf<MessageThread?>(null) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var isSearchActive by rememberSaveable { mutableStateOf(false) }
 
     val filteredThreads = remember(threads, searchQuery) {
         if (searchQuery.isBlank()) {
@@ -497,7 +503,7 @@ fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
-    var phoneNumber by remember { mutableStateOf("") }
+    var phoneNumber by rememberSaveable { mutableStateOf("") }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -532,8 +538,8 @@ fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
 @Composable
 fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> Unit, onImageClick: (Uri) -> Unit) {
     val context = LocalContext.current
-    var threadId by remember { mutableStateOf<String?>(null) }
-    var contactName by remember { mutableStateOf(address) }
+    var threadId by rememberSaveable { mutableStateOf<String?>(null) }
+    var contactName by rememberSaveable { mutableStateOf(address) }
 
     LaunchedEffect(address) {
         threadId = fetchThreadIdByAddress(context, address)
@@ -552,10 +558,10 @@ fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> 
 fun ChatScreen(threadId: String, contactName: String, address: String, refreshTrigger: Int = 0, onBack: () -> Unit, onImageClick: (Uri) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var textValue by remember { mutableStateOf("") }
+    var messages by rememberSaveable { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var textValue by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
-    var currentThreadId by remember { mutableStateOf(threadId) }
+    var currentThreadId by rememberSaveable { mutableStateOf(threadId) }
 
     LaunchedEffect(currentThreadId, refreshTrigger) {
         if (currentThreadId != "-1") {
@@ -704,7 +710,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
         val saved = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
         mutableStateListOf<String>().apply { addAll(saved) }
     }
-    var newKeyword by remember { mutableStateOf("") }
+    var newKeyword by rememberSaveable { mutableStateOf("") }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
