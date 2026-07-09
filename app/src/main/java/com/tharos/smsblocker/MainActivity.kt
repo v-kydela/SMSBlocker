@@ -116,7 +116,8 @@ data class MessageThread(
     val contactName: String?,
     val snippet: String,
     val date: Long,
-    val read: Boolean
+    val read: Boolean,
+    val isSpam: Boolean = false
 ) : Parcelable
 
 @Parcelize
@@ -242,10 +243,11 @@ fun MainNavigation() {
             Box(modifier = Modifier.padding(padding)) {
                 when (currentScreen) {
                     "threads" -> ConversationListScreen(
-                        threads = threads,
+                        threads = threads.filter { !it.isSpam },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
                         onSettingsClick = { currentScreen = "settings" },
+                        onSpamClick = { currentScreen = "spam" },
                         onThreadClick = { thread -> 
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
@@ -261,6 +263,28 @@ fun MainNavigation() {
                                     }
                                 }
                             }
+                        },
+                        onNewChat = { currentScreen = "new_chat" },
+                        onDeleteThread = { threadId ->
+                            scope.launch {
+                                deleteThread(context, threadId)
+                                threads = threads.filter { it.threadId != threadId }
+                            }
+                        }
+                    )
+                    "spam" -> ConversationListScreen(
+                        threads = threads.filter { it.isSpam },
+                        isLoading = isLoading,
+                        hasPermissions = hasRequiredPermissions,
+                        isSpamView = true,
+                        onSettingsClick = { currentScreen = "settings" },
+                        onSpamClick = { }, // already there
+                        onBack = { currentScreen = "threads" },
+                        onThreadClick = { thread -> 
+                            selectedThreadId = thread.threadId
+                            selectedContactName = thread.contactName ?: thread.address
+                            selectedAddress = thread.address
+                            currentScreen = "chat"
                         },
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThread = { threadId ->
@@ -311,7 +335,10 @@ fun ConversationListScreen(
     threads: List<MessageThread>,
     isLoading: Boolean,
     hasPermissions: Boolean,
-    onSettingsClick: () -> Unit, 
+    isSpamView: Boolean = false,
+    onSettingsClick: () -> Unit,
+    onSpamClick: () -> Unit = {},
+    onBack: () -> Unit = {},
     onThreadClick: (MessageThread) -> Unit,
     onNewChat: () -> Unit,
     onDeleteThread: (String) -> Unit
@@ -333,8 +360,20 @@ fun ConversationListScreen(
     }
 
     Scaffold(
+        topBar = {
+            if (isSpamView) {
+                TopAppBar(
+                    title = { Text("Spam & Blocked") },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                )
+            }
+        },
         floatingActionButton = {
-            if (!isSearchActive) {
+            if (!isSearchActive && !isSpamView) {
                 FloatingActionButton(onClick = onNewChat) {
                     Icon(Icons.Default.Add, contentDescription = "New Message")
                 }
@@ -342,58 +381,65 @@ fun ConversationListScreen(
         }
     ) { p ->
         Column(modifier = Modifier.fillMaxSize().padding(p)) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                SearchBar(
-                    inputField = {
-                        SearchBarDefaults.InputField(
-                            query = searchQuery,
-                            onQueryChange = { searchQuery = it },
-                            onSearch = { isSearchActive = false },
-                            expanded = isSearchActive,
-                            onExpandedChange = { isSearchActive = it },
-                            placeholder = { Text("Search messages...") },
-                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                            trailingIcon = {
-                                if (isSearchActive || searchQuery.isNotEmpty()) {
-                                    IconButton(onClick = {
-                                        if (searchQuery.isNotEmpty()) {
-                                            searchQuery = ""
-                                        } else {
-                                            isSearchActive = false
+            if (!isSpamView) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    SearchBar(
+                        inputField = {
+                            SearchBarDefaults.InputField(
+                                query = searchQuery,
+                                onQueryChange = { searchQuery = it },
+                                onSearch = { isSearchActive = false },
+                                expanded = isSearchActive,
+                                onExpandedChange = { isSearchActive = it },
+                                placeholder = { Text("Search messages...") },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                trailingIcon = {
+                                    if (isSearchActive || searchQuery.isNotEmpty()) {
+                                        IconButton(onClick = {
+                                            if (searchQuery.isNotEmpty()) {
+                                                searchQuery = ""
+                                            } else {
+                                                isSearchActive = false
+                                            }
+                                        }) {
+                                            Icon(Icons.Default.Close, contentDescription = "Clear search")
                                         }
-                                    }) {
-                                        Icon(Icons.Default.Close, contentDescription = "Clear search")
-                                    }
-                                } else {
-                                    IconButton(onClick = onSettingsClick) {
-                                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                    } else {
+                                        Row {
+                                            IconButton(onClick = onSpamClick) {
+                                                Icon(Icons.Default.Delete, contentDescription = "Spam & Blocked", tint = MaterialTheme.colorScheme.outline)
+                                            }
+                                            IconButton(onClick = onSettingsClick) {
+                                                Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        )
-                    },
-                    expanded = isSearchActive,
-                    onExpandedChange = { isSearchActive = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = SearchBarDefaults.colors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    )
-                ) {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        items(filteredThreads, key = { it.threadId }) { thread ->
-                            ThreadItem(
-                                thread,
-                                onClick = {
-                                    isSearchActive = false
-                                    onThreadClick(thread)
-                                },
-                                onDelete = { threadToDelete = thread }
                             )
-                            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                        },
+                        expanded = isSearchActive,
+                        onExpandedChange = { isSearchActive = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = SearchBarDefaults.colors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        )
+                    ) {
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(filteredThreads, key = { it.threadId }) { thread ->
+                                ThreadItem(
+                                    thread,
+                                    onClick = {
+                                        isSearchActive = false
+                                        onThreadClick(thread)
+                                    },
+                                    onDelete = { threadToDelete = thread }
+                                )
+                                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                            }
                         }
                     }
                 }
@@ -849,8 +895,76 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
 private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
     val uri = "content://mms-sms/conversations?simple=true".toUri()
+    // Try to include 'type' to see if it indicates spam/blocked
+    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type")
+    val sortOrder = "date DESC LIMIT 50"
+
+    val baseThreads = mutableListOf<MessageThread>()
+    val recipientIdSet = mutableSetOf<String>()
+
+    try {
+        contentResolver.query(uri, projection, null, null, sortOrder)?.use { c ->
+            val idIdx = c.getColumnIndex("_id")
+            val snippetIdx = c.getColumnIndex("snippet")
+            val dateIdx = c.getColumnIndex("date")
+            val readIdx = c.getColumnIndex("read")
+            val recipientIdsIdx = c.getColumnIndex("recipient_ids")
+            val typeIdx = c.getColumnIndex("type")
+            
+            while (c.moveToNext()) {
+                val threadId = c.getString(idIdx) ?: continue
+                val snippet = c.getString(snippetIdx) ?: ""
+                val date = c.getLong(dateIdx)
+                val read = c.getInt(readIdx) == 1
+                val recipientIds = c.getString(recipientIdsIdx) ?: ""
+                val type = if (typeIdx != -1) c.getInt(typeIdx) else 0
+                
+                val firstId = recipientIds.split(" ").firstOrNull() ?: ""
+                if (firstId.isNotBlank()) recipientIdSet.add(firstId)
+                
+                // For now, let's assume type 4 might be spam/blocked if it appears
+                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = type == 4))
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to query conversations", e)
+        // Fallback if 'type' column doesn't exist
+        return@withContext fetchThreadsFastLegacy(context, contactCache)
+    }
+
+    if (baseThreads.isEmpty()) return@withContext emptyList()
+
+    val addrMap = mutableMapOf<String, String>()
+    if (recipientIdSet.isNotEmpty()) {
+        val selection = "_id IN (${recipientIdSet.joinToString(",")})"
+        try {
+            contentResolver.query("content://mms-sms/canonical-addresses".toUri(), arrayOf("_id", "address"), selection, null, null)?.use { c ->
+                val idIdx = c.getColumnIndex("_id")
+                val addrIdx = c.getColumnIndex("address")
+                while (c.moveToNext()) {
+                    addrMap[c.getString(idIdx)] = c.getString(addrIdx)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("SMSBlocker", "Error fetching addresses", e)
+        }
+    }
+
+    return@withContext baseThreads.map { thread ->
+        val addr = addrMap[thread.address] ?: "Unknown"
+        val normalized = addr.replace(Regex("[^0-9+]"), "")
+        thread.copy(
+            address = addr,
+            contactName = contactCache[normalized]
+        )
+    }
+}
+
+private suspend fun fetchThreadsFastLegacy(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
+    val contentResolver: ContentResolver = context.contentResolver
+    val uri = "content://mms-sms/conversations?simple=true".toUri()
     val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids")
-    val sortOrder = "date DESC LIMIT 30" // Reduced limit for even faster initial snap
+    val sortOrder = "date DESC LIMIT 30"
 
     val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
@@ -877,7 +991,7 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
             }
         }
     } catch (e: Exception) {
-        Log.e("SMSBlocker", "Failed to query conversations", e)
+        Log.e("SMSBlocker", "Failed to query conversations legacy", e)
     }
 
     if (baseThreads.isEmpty()) return@withContext emptyList()
@@ -997,11 +1111,25 @@ private suspend fun resolveThreadDetails(context: Context, threads: List<Message
         }
     }
 
-    // 2. Resolve missing snippets and apply names
+    // 2. Resolve blocked numbers
+    val blockedNumbers = mutableSetOf<String>()
+    try {
+        contentResolver.query(android.provider.BlockedNumberContract.BlockedNumbers.CONTENT_URI, arrayOf(android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER), null, null, null)?.use { cursor ->
+            val numIdx = cursor.getColumnIndex(android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER)
+            while (cursor.moveToNext()) {
+                cursor.getString(numIdx)?.let { blockedNumbers.add(it.replace(Regex("[^0-9+]"), "")) }
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Error fetching blocked numbers", e)
+    }
+
+    // 3. Resolve missing snippets and apply names/spam status
     threads.map { thread ->
         val normalized = thread.address.replace(Regex("[^0-9+]"), "")
         val name = contactMap[normalized] ?: fetchContactName(contentResolver, thread.address)
-        thread.copy(contactName = name)
+        val isBlocked = blockedNumbers.contains(normalized)
+        thread.copy(contactName = name, isSpam = thread.isSpam || isBlocked)
     }
 }
 
