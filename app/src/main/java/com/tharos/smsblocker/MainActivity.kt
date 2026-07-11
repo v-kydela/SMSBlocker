@@ -873,8 +873,8 @@ fun StatusRow(label: String, status: Boolean) {
 
 private fun saveThreadsToCache(context: Context, threads: List<MessageThread>) {
     val prefs = context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE)
-    val serialized = threads.take(20).joinToString("||") { 
-        "${it.threadId}|${it.address}|${it.contactName ?: ""}|${it.snippet.replace("\n", " ")}|${it.date}|${it.read}" 
+    val serialized = threads.take(30).joinToString("||") { 
+        "${it.threadId}|${it.address}|${it.contactName ?: ""}|${it.snippet.replace("\n", " ")}|${it.date}|${it.read}|${it.isSpam}" 
     }
     prefs.edit { putString("cached_list", serialized) }
 }
@@ -885,7 +885,15 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
     return try {
         serialized.split("||").map {
             val parts = it.split("|")
-            MessageThread(parts[0], parts[1], parts[2].ifBlank { null }, parts[3], parts[4].toLong(), parts[5].toBoolean())
+            MessageThread(
+                parts[0], 
+                parts[1], 
+                parts[2].ifBlank { null }, 
+                parts[3], 
+                parts[4].toLong(), 
+                parts[5].toBoolean(),
+                if (parts.size > 6) parts[6].toBoolean() else false
+            )
         }
     } catch (_: Exception) {
         emptyList()
@@ -895,9 +903,9 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
 private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
     val uri = "content://mms-sms/conversations?simple=true".toUri()
-    // Try to include 'type' to see if it indicates spam/blocked
-    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type")
-    val sortOrder = "date DESC LIMIT 50"
+    // Include 'archived' and 'type'
+    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type", "archived")
+    val sortOrder = "date DESC LIMIT 100" // Fetch more to find spam
 
     val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
@@ -910,6 +918,7 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
             val readIdx = c.getColumnIndex("read")
             val recipientIdsIdx = c.getColumnIndex("recipient_ids")
             val typeIdx = c.getColumnIndex("type")
+            val archivedIdx = c.getColumnIndex("archived")
             
             while (c.moveToNext()) {
                 val threadId = c.getString(idIdx) ?: continue
@@ -918,17 +927,16 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
                 val read = c.getInt(readIdx) == 1
                 val recipientIds = c.getString(recipientIdsIdx) ?: ""
                 val type = if (typeIdx != -1) c.getInt(typeIdx) else 0
+                val archived = if (archivedIdx != -1) c.getInt(archivedIdx) == 1 else false
                 
                 val firstId = recipientIds.split(" ").firstOrNull() ?: ""
                 if (firstId.isNotBlank()) recipientIdSet.add(firstId)
                 
-                // For now, let's assume type 4 might be spam/blocked if it appears
-                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = type == 4))
+                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = archived || type == 4))
             }
         }
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to query conversations", e)
-        // Fallback if 'type' column doesn't exist
         return@withContext fetchThreadsFastLegacy(context, contactCache)
     }
 
@@ -1111,17 +1119,21 @@ private suspend fun resolveThreadDetails(context: Context, threads: List<Message
         }
     }
 
-    // 2. Resolve blocked numbers
+    // 2. Resolve blocked numbers (Only if we are the default app or have system access)
     val blockedNumbers = mutableSetOf<String>()
-    try {
-        contentResolver.query(android.provider.BlockedNumberContract.BlockedNumbers.CONTENT_URI, arrayOf(android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER), null, null, null)?.use { cursor ->
-            val numIdx = cursor.getColumnIndex(android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER)
-            while (cursor.moveToNext()) {
-                cursor.getString(numIdx)?.let { blockedNumbers.add(it.replace(Regex("[^0-9+]"), "")) }
+    if (Telephony.Sms.getDefaultSmsPackage(context) == context.packageName) {
+        try {
+            contentResolver.query(android.provider.BlockedNumberContract.BlockedNumbers.CONTENT_URI, arrayOf(android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER), null, null, null)?.use { cursor ->
+                val numIdx = cursor.getColumnIndex(android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER)
+                while (cursor.moveToNext()) {
+                    cursor.getString(numIdx)?.let { blockedNumbers.add(it.replace(Regex("[^0-9+]"), "")) }
+                }
             }
+        } catch (e: Exception) {
+            Log.e("SMSBlocker", "Error fetching blocked numbers", e)
         }
-    } catch (e: Exception) {
-        Log.e("SMSBlocker", "Error fetching blocked numbers", e)
+    } else {
+        Log.d("SMSBlocker", "Not default app: Skipping BlockedNumberContract query")
     }
 
     // 3. Resolve missing snippets and apply names/spam status
