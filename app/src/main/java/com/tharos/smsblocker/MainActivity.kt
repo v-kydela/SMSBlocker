@@ -3,6 +3,7 @@ package com.tharos.smsblocker
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.role.RoleManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
@@ -96,6 +97,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.tharos.smsblocker.ui.theme.SMSBlockerTheme
 import kotlinx.coroutines.Dispatchers
@@ -752,17 +756,27 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
         )
     }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isDefaultSmsApp = Telephony.Sms.getDefaultSmsPackage(context) == packageName
+                hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED &&
+                                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
+                                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     val keywords = remember { 
         val saved = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
         mutableStateListOf<String>().apply { addAll(saved) }
     }
     var newKeyword by rememberSaveable { mutableStateOf("") }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        hasPermission = permissions.values.all { it }
-    }
 
     val defaultAppLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -779,25 +793,33 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
             StatusRow(label = "Default SMS App", status = isDefaultSmsApp)
             
             Button(onClick = {
-                permissionLauncher.launch(arrayOf(
-                    Manifest.permission.RECEIVE_SMS,
-                    Manifest.permission.READ_SMS,
-                    Manifest.permission.SEND_SMS,
-                    Manifest.permission.RECEIVE_MMS,
-                    Manifest.permission.READ_CONTACTS,
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) 
-                        Manifest.permission.POST_NOTIFICATIONS else Manifest.permission.RECEIVE_SMS
-                ))
+                val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", packageName, null)
+                }
+                context.startActivity(intent)
             }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                Text("Grant Permissions")
+                Text("Manage Permissions in Settings")
             }
 
             if (!isDefaultSmsApp) {
                 Button(onClick = {
-                    val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
-                        putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            val roleManager = context.getSystemService(RoleManager::class.java)
+                            if (roleManager?.isRoleAvailable(RoleManager.ROLE_SMS) == true) {
+                                val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS)
+                                defaultAppLauncher.launch(intent)
+                            }
+                        } else {
+                            @Suppress("DEPRECATION")
+                            val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                                putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                            }
+                            defaultAppLauncher.launch(intent)
+                        }
+                    } catch (e: Exception) {
+                        Log.e("SMSBlocker", "Failed to request default SMS app", e)
                     }
-                    defaultAppLauncher.launch(intent)
                 }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                     Text("Set as Default SMS App")
                 }
