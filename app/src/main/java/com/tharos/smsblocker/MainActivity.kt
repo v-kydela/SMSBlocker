@@ -112,6 +112,7 @@ import java.util.Date
 import java.util.Locale
 import androidx.core.content.edit
 import kotlinx.parcelize.Parcelize
+import kotlin.math.abs
 
 @Parcelize
 data class MessageThread(
@@ -130,7 +131,8 @@ data class ChatMessage(
     val body: String,
     val date: Long,
     val isMe: Boolean,
-    val imageUri: Uri? = null
+    val imageUri: Uri? = null,
+    val reactions: List<String> = emptyList()
 ) : Parcelable
 
 @Parcelize
@@ -733,6 +735,28 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                     )
                 }
             }
+            
+            if (message.reactions.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.padding(top = 2.dp)
+                ) {
+                    message.reactions.forEach { emoji ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            tonalElevation = 2.dp,
+                            border = androidx.compose.foundation.BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Text(
+                                text = emoji,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                fontSize = 12.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(2.dp))
+                    }
+                }
+            }
         }
     }
 }
@@ -1196,25 +1220,28 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
 
     // 2. Fetch MMS
     val mmsUri = Telephony.Mms.CONTENT_URI
-    val mmsProjection = arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX)
+    val mmsProjection = arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.SUBJECT)
     val mmsSelection = "${Telephony.Mms.THREAD_ID} = ?"
     
     contentResolver.query(mmsUri, mmsProjection, mmsSelection, selectionArgs, null)?.use { cursor ->
         val idIdx = cursor.getColumnIndexOrThrow(Telephony.Mms._ID)
         val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.DATE)
         val boxIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.MESSAGE_BOX)
+        val subIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.SUBJECT)
         
         while (cursor.moveToNext()) {
             val mmsId = cursor.getString(idIdx)
-            // MMS date is in seconds, SMS is in milliseconds
             val date = cursor.getLong(dateIdx) * 1000 
             val isMe = cursor.getInt(boxIdx) == Telephony.Mms.MESSAGE_BOX_SENT
+            val subject = cursor.getString(subIdx) ?: ""
             
             val mmsData = fetchMmsData(contentResolver, mmsId)
-            if (mmsData.text.isNotBlank() || mmsData.imageUri != null) {
+            val bodyText = mmsData.text.ifBlank { subject }
+            
+            if (bodyText.isNotBlank() || mmsData.imageUri != null) {
                 messages.add(ChatMessage(
                     id = "mms_$mmsId",
-                    body = mmsData.text,
+                    body = bodyText,
                     date = date,
                     isMe = isMe,
                     imageUri = mmsData.imageUri
@@ -1223,7 +1250,97 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
         }
     }
 
-    messages.sortedBy { it.date }
+    val sorted = messages.sortedBy { it.date }
+    processReactions(sorted)
+}
+
+private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
+    val reactionMap = mapOf(
+        "Liked" to "👍", "Loved" to "❤️", "Disliked" to "👎",
+        "Laughed at" to "😂", "Emphasized" to "‼️", "Questioned" to "❓"
+    )
+    
+    // Patterns for different reaction styles (iMessage fallback and Google Messages fallback)
+    val patterns = listOf(
+        Regex("^(Liked|Loved|Disliked|Laughed at|Emphasized|Questioned) [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
+        Regex("^(\\S+) to [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
+        Regex("^Reacted (\\S+) to [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
+        Regex("^Removed (?:a |an )?(.+?) from [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE)
+    )
+    
+    val reactionMessages = mutableSetOf<String>()
+    val resultMessages = messages.map { it.copy() }.toMutableList()
+    
+    // Helper to normalize text for fuzzy matching (remove punctuation/quotes/case)
+    fun normalize(text: String) = text.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    for (i in messages.indices) {
+        val msg = messages[i]
+        val body = msg.body.trim()
+        
+        var emoji: String? = null
+        var snippet: String? = null
+        var isRemoval = false
+
+        for (pattern in patterns) {
+            val match = pattern.find(body)
+            if (match != null) {
+                val val1 = match.groupValues[1]
+                val val2 = match.groupValues[2]
+                
+                if (pattern.pattern.contains("Removed")) {
+                    isRemoval = true
+                    emoji = reactionMap.entries.find { it.key.equals(val1, ignoreCase = true) }?.value ?: val1
+                    snippet = val2
+                } else if (pattern.pattern.startsWith("^(\\S+)")) { // emoji first style
+                    emoji = val1
+                    snippet = val2
+                } else { // text first style
+                    emoji = reactionMap.entries.find { it.key.equals(val1, ignoreCase = true) }?.value ?: val1
+                    snippet = val2
+                }
+                break
+            }
+        }
+
+        if (emoji != null && snippet != null && snippet.length >= 2) {
+            val normalizedSnippet = normalize(snippet)
+            var targetIndex = -1
+            var minTimeDiff = Long.MAX_VALUE
+            
+            // Find the best target message (the one containing the snippet and closest in time)
+            for (j in messages.indices) {
+                if (i == j) continue
+                val target = messages[j]
+                val normalizedTarget = normalize(target.body)
+                
+                val bodyMatch = normalizedTarget.contains(normalizedSnippet)
+                val imageMatch = normalizedSnippet.contains("image") && target.imageUri != null
+                
+                if (bodyMatch || imageMatch) {
+                    val timeDiff = abs(msg.date - target.date)
+                    if (timeDiff < minTimeDiff) {
+                        minTimeDiff = timeDiff
+                        targetIndex = j
+                    }
+                }
+            }
+            
+            if (targetIndex != -1) {
+                val target = resultMessages[targetIndex]
+                val currentReactions = target.reactions.toMutableList()
+                if (isRemoval) {
+                    currentReactions.remove(emoji)
+                } else if (!currentReactions.contains(emoji)) {
+                    currentReactions.add(emoji)
+                }
+                resultMessages[targetIndex] = target.copy(reactions = currentReactions)
+                reactionMessages.add(msg.id)
+            }
+        }
+    }
+    
+    return resultMessages.filter { it.id !in reactionMessages }
 }
 
 private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsData {
