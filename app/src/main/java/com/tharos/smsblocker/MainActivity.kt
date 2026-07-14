@@ -177,7 +177,7 @@ fun MainNavigation() {
                                 ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
 
     // Cache threads at the navigation level to avoid re-loading when returning from chat
-    var threads by rememberSaveable { mutableStateOf(loadThreadsFromCache(context)) }
+    var threads by remember { mutableStateOf(loadThreadsFromCache(context)) }
     var isLoading by rememberSaveable { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
     var refreshTrigger by rememberSaveable { mutableIntStateOf(0) }
 
@@ -795,6 +795,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
             Button(onClick = {
                 val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = Uri.fromParts("package", packageName, null)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 context.startActivity(intent)
             }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
