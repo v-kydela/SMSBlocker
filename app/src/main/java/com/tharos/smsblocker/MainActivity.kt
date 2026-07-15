@@ -1193,65 +1193,84 @@ private suspend fun resolveThreadDetails(context: Context, threads: List<Message
 }
 
 private suspend fun fetchMessagesForThread(context: Context, threadId: String): List<ChatMessage> = withContext(Dispatchers.IO) {
-    val messages = mutableListOf<ChatMessage>()
     val contentResolver = context.contentResolver
-
-    // 1. Fetch SMS
-    val smsUri = Telephony.Sms.CONTENT_URI
-    val smsProjection = arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE)
-    val smsSelection = "${Telephony.Sms.THREAD_ID} = ?"
     val selectionArgs = arrayOf(threadId)
-    
-    contentResolver.query(smsUri, smsProjection, smsSelection, selectionArgs, null)?.use { cursor ->
-        val idIdx = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
-        val bodyIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
-        val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
-        val typeIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
-        
-        while (cursor.moveToNext()) {
-            messages.add(ChatMessage(
-                id = "sms_${cursor.getString(idIdx)}",
-                body = cursor.getString(bodyIdx) ?: "",
-                date = cursor.getLong(dateIdx),
-                isMe = cursor.getInt(typeIdx) == Telephony.Sms.MESSAGE_TYPE_SENT
-            ))
-        }
-    }
 
-    // 2. Fetch MMS
-    val mmsUri = Telephony.Mms.CONTENT_URI
-    val mmsProjection = arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.SUBJECT)
-    val mmsSelection = "${Telephony.Mms.THREAD_ID} = ?"
-    
-    contentResolver.query(mmsUri, mmsProjection, mmsSelection, selectionArgs, null)?.use { cursor ->
-        val idIdx = cursor.getColumnIndexOrThrow(Telephony.Mms._ID)
-        val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.DATE)
-        val boxIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.MESSAGE_BOX)
-        val subIdx = cursor.getColumnIndexOrThrow(Telephony.Mms.SUBJECT)
-        
-        while (cursor.moveToNext()) {
-            val mmsId = cursor.getString(idIdx)
-            val date = cursor.getLong(dateIdx) * 1000 
-            val isMe = cursor.getInt(boxIdx) == Telephony.Mms.MESSAGE_BOX_SENT
-            val subject = cursor.getString(subIdx) ?: ""
-            
-            val mmsData = fetchMmsData(contentResolver, mmsId)
-            val bodyText = mmsData.text.ifBlank { subject }
-            
-            if (bodyText.isNotBlank() || mmsData.imageUri != null) {
-                messages.add(ChatMessage(
-                    id = "mms_$mmsId",
-                    body = bodyText,
-                    date = date,
-                    isMe = isMe,
-                    imageUri = mmsData.imageUri
-                ))
+    kotlinx.coroutines.coroutineScope {
+        val smsDeferred = async {
+            val smsMessages = mutableListOf<ChatMessage>()
+            try {
+                val smsUri = Telephony.Sms.CONTENT_URI
+                val smsProjection = arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE)
+                val smsSelection = "${Telephony.Sms.THREAD_ID} = ?"
+                
+                contentResolver.query(smsUri, smsProjection, smsSelection, selectionArgs, null)?.use { cursor ->
+                    val idIdx = cursor.getColumnIndex(Telephony.Sms._ID)
+                    val bodyIdx = cursor.getColumnIndex(Telephony.Sms.BODY)
+                    val dateIdx = cursor.getColumnIndex(Telephony.Sms.DATE)
+                    val typeIdx = cursor.getColumnIndex(Telephony.Sms.TYPE)
+                    
+                    while (cursor.moveToNext()) {
+                        if (idIdx != -1 && bodyIdx != -1 && dateIdx != -1 && typeIdx != -1) {
+                            smsMessages.add(ChatMessage(
+                                id = "sms_${cursor.getString(idIdx)}",
+                                body = cursor.getString(bodyIdx) ?: "",
+                                date = cursor.getLong(dateIdx),
+                                isMe = cursor.getInt(typeIdx) == Telephony.Sms.MESSAGE_TYPE_SENT
+                            ))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("SMSBlocker", "Error fetching SMS for thread $threadId", e)
             }
+            smsMessages
         }
-    }
 
-    val sorted = messages.sortedBy { it.date }
-    processReactions(sorted)
+        val mmsDeferred = async {
+            val mmsMessages = mutableListOf<ChatMessage>()
+            try {
+                val mmsUri = Telephony.Mms.CONTENT_URI
+                val mmsProjection = arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.SUBJECT)
+                val mmsSelection = "thread_id = ?"
+                
+                contentResolver.query(mmsUri, mmsProjection, mmsSelection, selectionArgs, null)?.use { cursor ->
+                    val idIdx = cursor.getColumnIndex(Telephony.Mms._ID)
+                    val dateIdx = cursor.getColumnIndex(Telephony.Mms.DATE)
+                    val boxIdx = cursor.getColumnIndex(Telephony.Mms.MESSAGE_BOX)
+                    val subIdx = cursor.getColumnIndex(Telephony.Mms.SUBJECT)
+                    
+                    while (cursor.moveToNext()) {
+                        if (idIdx != -1 && dateIdx != -1 && boxIdx != -1) {
+                            val mmsId = cursor.getString(idIdx)
+                            val date = cursor.getLong(dateIdx) * 1000 
+                            val isMe = cursor.getInt(boxIdx) == Telephony.Mms.MESSAGE_BOX_SENT
+                            val subject = if (subIdx != -1) cursor.getString(subIdx) ?: "" else ""
+                            
+                            val mmsData = fetchMmsData(contentResolver, mmsId)
+                            val bodyText = mmsData.text.ifBlank { subject }
+                            
+                            if (bodyText.isNotBlank() || mmsData.imageUri != null) {
+                                mmsMessages.add(ChatMessage(
+                                    id = "mms_$mmsId",
+                                    body = bodyText,
+                                    date = date,
+                                    isMe = isMe,
+                                    imageUri = mmsData.imageUri
+                                ))
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("SMSBlocker", "Error fetching MMS for thread $threadId", e)
+            }
+            mmsMessages
+        }
+
+        val allMessages = smsDeferred.await() + mmsDeferred.await()
+        processReactions(allMessages.sortedBy { it.date })
+    }
 }
 
 private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
@@ -1260,7 +1279,6 @@ private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
         "Laughed at" to "😂", "Emphasized" to "‼️", "Questioned" to "❓"
     )
     
-    // Patterns for different reaction styles (iMessage fallback and Google Messages fallback)
     val patterns = listOf(
         Regex("^(Liked|Loved|Disliked|Laughed at|Emphasized|Questioned) [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
         Regex("^(\\S+) to [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
@@ -1271,12 +1289,15 @@ private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
     val reactionMessages = mutableSetOf<String>()
     val resultMessages = messages.map { it.copy() }.toMutableList()
     
-    // Helper to normalize text for fuzzy matching (remove punctuation/quotes/case)
-    fun normalize(text: String) = text.lowercase().replace(Regex("[^a-z0-9]"), "")
+    fun normalize(text: String): String {
+        val n = text.lowercase().replace(Regex("[^a-z0-9]"), "")
+        return n.ifBlank { text.trim().lowercase() } // Don't return empty for emoji-only
+    }
 
     for (i in messages.indices) {
         val msg = messages[i]
         val body = msg.body.trim()
+        if (body.isBlank()) continue
         
         var emoji: String? = null
         var snippet: String? = null
@@ -1295,7 +1316,7 @@ private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
                 } else if (pattern.pattern.startsWith("^(\\S+)")) { // emoji first style
                     emoji = val1
                     snippet = val2
-                } else { // text first style
+                } else {
                     emoji = reactionMap.entries.find { it.key.equals(val1, ignoreCase = true) }?.value ?: val1
                     snippet = val2
                 }
@@ -1308,18 +1329,17 @@ private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
             var targetIndex = -1
             var minTimeDiff = Long.MAX_VALUE
             
-            // Find the best target message (the one containing the snippet and closest in time)
             for (j in messages.indices) {
                 if (i == j) continue
                 val target = messages[j]
                 val normalizedTarget = normalize(target.body)
                 
-                val bodyMatch = normalizedTarget.contains(normalizedSnippet)
-                val imageMatch = normalizedSnippet.contains("image") && target.imageUri != null
+                val bodyMatch = normalizedSnippet.isNotEmpty() && normalizedTarget.contains(normalizedSnippet)
+                val imageMatch = snippet.lowercase().contains("image") && target.imageUri != null
                 
                 if (bodyMatch || imageMatch) {
                     val timeDiff = abs(msg.date - target.date)
-                    if (timeDiff < minTimeDiff) {
+                    if (timeDiff < minTimeDiff && timeDiff < 600000) { // Max 10 mins apart
                         minTimeDiff = timeDiff
                         targetIndex = j
                     }
@@ -1357,17 +1377,19 @@ private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsDa
             val idIdx = cursor.getColumnIndex("_id")
             
             while (cursor.moveToNext()) {
-                val ct = cursor.getString(ctIdx)
+                val ct = if (ctIdx != -1) cursor.getString(ctIdx) else null
                 if (ct == "text/plain") {
-                    text += (cursor.getString(textIdx) ?: "")
+                    if (textIdx != -1) text += (cursor.getString(textIdx) ?: "")
                 } else if (ct != null && ct.startsWith("image/")) {
-                    val partId = cursor.getString(idIdx)
-                    imageUri = "content://mms/part/$partId".toUri()
+                    if (idIdx != -1) {
+                        val partId = cursor.getString(idIdx)
+                        imageUri = "content://mms/part/$partId".toUri()
+                    }
                 }
             }
         }
     } catch (e: Exception) {
-        Log.e("SMSBlocker", "Error fetching MMS data", e)
+        Log.e("SMSBlocker", "Error fetching MMS data for part $mmsId", e)
     }
     return MmsData(text, imageUri)
 }
