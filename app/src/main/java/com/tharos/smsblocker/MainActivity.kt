@@ -214,16 +214,33 @@ fun MainNavigation() {
         if (hasRequiredPermissions && currentScreen == "threads") {
             if (threads.isEmpty()) isLoading = true
             
-            // Phase 1: Fast Fetch (Basic thread info + Addresses only)
-            // This returns almost instantly.
+            // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
+            // This returns almost instantly from the conversation view.
             val baseThreads = fetchThreadsFast(context, contactCache)
-            threads = baseThreads
+            
+            // Merge to prevent UI flicker: if a thread already exists in our state,
+            // don't overwrite its snippet/name with empty values while we are refreshing.
+            threads = if (threads.isEmpty()) {
+                baseThreads
+            } else {
+                baseThreads.map { new ->
+                    val existing = threads.find { it.threadId == new.threadId }
+                    if (existing != null) {
+                        new.copy(
+                            snippet = new.snippet.ifBlank { existing.snippet },
+                            contactName = new.contactName ?: existing.contactName
+                        )
+                    } else {
+                        new
+                    }
+                }
+            }
             isLoading = false
             
-            // Phase 2: Background Deep Sync (Snippets + Contact Names)
-            // This runs while the user is already looking at the list.
+            // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names)
+            // This runs in the background while the user is already looking at the list.
             scope.launch {
-                val updatedWithSnippets = resolveMissingSnippets(context, baseThreads)
+                val updatedWithSnippets = resolveMissingSnippets(context, threads)
                 threads = updatedWithSnippets
                 
                 val finalThreads = resolveThreadDetails(context, updatedWithSnippets)
