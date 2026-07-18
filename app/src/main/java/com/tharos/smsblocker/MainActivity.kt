@@ -168,6 +168,7 @@ fun createNotificationChannel(context: Context) {
 @Composable
 fun MainNavigation() {
     var currentScreen by rememberSaveable { mutableStateOf("threads") }
+    var returnToScreen by rememberSaveable { mutableStateOf("threads") }
     var selectedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedContactName by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAddress by rememberSaveable { mutableStateOf<String?>(null) }
@@ -256,6 +257,8 @@ fun MainNavigation() {
     BackHandler(enabled = currentScreen != "threads" || selectedImageUri != null) {
         if (selectedImageUri != null) {
             selectedImageUri = null
+        } else if (currentScreen == "chat" || currentScreen == "chat_by_address") {
+            currentScreen = returnToScreen
         } else {
             currentScreen = "threads"
         }
@@ -275,6 +278,7 @@ fun MainNavigation() {
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
                             selectedAddress = thread.address
+                            returnToScreen = "threads"
                             currentScreen = "chat"
                             
                             // Mark as read in DB and update local state
@@ -307,6 +311,7 @@ fun MainNavigation() {
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
                             selectedAddress = thread.address
+                            returnToScreen = "spam"
                             currentScreen = "chat"
                         },
                         onNewChat = { currentScreen = "new_chat" },
@@ -322,7 +327,7 @@ fun MainNavigation() {
                         contactName = selectedContactName ?: "Unknown",
                         address = selectedAddress!!,
                         refreshTrigger = refreshTrigger,
-                        onBack = { currentScreen = "threads" },
+                        onBack = { currentScreen = returnToScreen },
                         onImageClick = { selectedImageUri = it }
                     )
                     "new_chat" -> NewChatScreen(
@@ -330,13 +335,14 @@ fun MainNavigation() {
                         onStartChat = { address ->
                             selectedAddress = address
                             selectedContactName = null
+                            returnToScreen = "threads"
                             currentScreen = "chat_by_address"
                         }
                     )
                     "chat_by_address" -> ChatByAddressScreen(
                         address = selectedAddress!!,
                         refreshTrigger = refreshTrigger,
-                        onBack = { currentScreen = "threads" },
+                        onBack = { currentScreen = returnToScreen },
                         onImageClick = { selectedImageUri = it }
                     )
                     "settings" -> SmsBlockerSettingsScreen(
