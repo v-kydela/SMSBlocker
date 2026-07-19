@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -113,6 +114,12 @@ import java.util.Locale
 import androidx.core.content.edit
 import kotlinx.parcelize.Parcelize
 import kotlin.math.abs
+
+@Parcelize
+data class Contact(
+    val name: String,
+    val number: String
+) : Parcelable
 
 @Parcelize
 data class MessageThread(
@@ -578,7 +585,26 @@ fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
-    var phoneNumber by rememberSaveable { mutableStateOf("") }
+    val context = LocalContext.current
+    var query by rememberSaveable { mutableStateOf("") }
+    var allContacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        allContacts = fetchAllContacts(context)
+        isLoading = false
+    }
+
+    val filteredContacts = remember(query, allContacts) {
+        if (query.isBlank()) {
+            allContacts
+        } else {
+            allContacts.filter {
+                it.name.contains(query, ignoreCase = true) ||
+                        it.number.contains(query, ignoreCase = true)
+            }
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -590,24 +616,98 @@ fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
             }
         )
 
-        Column(modifier = Modifier.padding(16.dp)) {
-            TextField(
-                value = phoneNumber,
-                onValueChange = { phoneNumber = it },
-                label = { Text("Recipient number") },
+        Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("To: Name or number") },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                trailingIcon = {
+                    if (query.isNotBlank()) {
+                        IconButton(onClick = {
+                            // If it looks like a number, allow starting chat directly
+                            onStartChat(query)
+                        }) {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Start Chat")
+                        }
+                    }
+                }
             )
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = { if (phoneNumber.isNotBlank()) onStartChat(phoneNumber) },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = phoneNumber.isNotBlank()
-            ) {
-                Text("Start Chat")
+            
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (isLoading) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(filteredContacts) { contact ->
+                        ContactItem(contact = contact, onClick = { onStartChat(contact.number) })
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+fun ContactItem(contact: Contact, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(
+            modifier = Modifier.size(40.dp),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.primaryContainer
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = contact.name.take(1).uppercase(),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column {
+            Text(text = contact.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+            Text(text = contact.number, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+private suspend fun fetchAllContacts(context: Context): List<Contact> = withContext(Dispatchers.IO) {
+    val contacts = mutableListOf<Contact>()
+    val contentResolver = context.contentResolver
+    val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+    val projection = arrayOf(
+        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+        ContactsContract.CommonDataKinds.Phone.NUMBER
+    )
+
+    try {
+        contentResolver.query(uri, projection, null, null, "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC")?.use { cursor ->
+            val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val numberIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(nameIdx) ?: "Unknown"
+                val number = cursor.getString(numberIdx) ?: continue
+                contacts.add(Contact(name, number))
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Error fetching contacts", e)
+    }
+    // De-duplicate by normalized number
+    contacts.distinctBy { it.number.replace(Regex("[^0-9+]"), "") }
 }
 
 @Composable
