@@ -51,8 +51,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.SearchBar
-import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -65,6 +63,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SearchBar
+import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -97,6 +97,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -108,11 +109,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.parcelize.Parcelize
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import androidx.core.content.edit
-import kotlinx.parcelize.Parcelize
 import kotlin.math.abs
 
 @Parcelize
@@ -625,9 +625,13 @@ fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
                 trailingIcon = {
-                    if (query.isNotBlank()) {
+                    val isNumber = remember(query) {
+                        query.isNotBlank() && 
+                        query.any { it.isDigit() } && 
+                        query.all { it.isDigit() || "+-() ".contains(it) }
+                    }
+                    if (isNumber) {
                         IconButton(onClick = {
-                            // If it looks like a number, allow starting chat directly
                             onStartChat(query)
                         }) {
                             Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Start Chat")
