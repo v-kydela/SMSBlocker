@@ -342,7 +342,7 @@ fun MainNavigation() {
                         onStartChat = { address ->
                             selectedAddress = address
                             selectedContactName = null
-                            returnToScreen = "threads"
+                            returnToScreen = "new_chat"
                             currentScreen = "chat_by_address"
                         }
                     )
