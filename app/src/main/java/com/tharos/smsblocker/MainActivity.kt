@@ -48,8 +48,10 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -129,7 +131,8 @@ data class MessageThread(
     val snippet: String,
     val date: Long,
     val read: Boolean,
-    val isSpam: Boolean = false
+    val isSpam: Boolean = false,
+    val isDeleted: Boolean = false
 ) : Parcelable
 
 @Parcelize
@@ -276,11 +279,12 @@ fun MainNavigation() {
             Box(modifier = Modifier.padding(padding)) {
                 when (currentScreen) {
                     "threads" -> ConversationListScreen(
-                        threads = threads.filter { !it.isSpam },
+                        threads = threads.filter { !it.isSpam && !it.isDeleted },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
                         onSettingsClick = { currentScreen = "settings" },
                         onSpamClick = { currentScreen = "spam" },
+                        onTrashClick = { currentScreen = "trash" },
                         onThreadClick = { thread -> 
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
@@ -301,18 +305,24 @@ fun MainNavigation() {
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThread = { threadId ->
                             scope.launch {
-                                deleteThread(context, threadId)
-                                threads = threads.filter { it.threadId != threadId }
+                                val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+                                val trashed = prefs.getStringSet("trashed_threads", emptySet())?.toMutableSet() ?: mutableSetOf()
+                                trashed.add(threadId)
+                                prefs.edit { putStringSet("trashed_threads", trashed) }
+                                threads = threads.map { 
+                                    if (it.threadId == threadId) it.copy(isDeleted = true) else it 
+                                }
                             }
                         }
                     )
                     "spam" -> ConversationListScreen(
-                        threads = threads.filter { it.isSpam },
+                        threads = threads.filter { it.isSpam && !it.isDeleted },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
                         isSpamView = true,
                         onSettingsClick = { currentScreen = "settings" },
                         onSpamClick = { }, // already there
+                        onTrashClick = { currentScreen = "trash" },
                         onBack = { currentScreen = "threads" },
                         onThreadClick = { thread -> 
                             selectedThreadId = thread.threadId
@@ -324,8 +334,50 @@ fun MainNavigation() {
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThread = { threadId ->
                             scope.launch {
+                                val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+                                val trashed = prefs.getStringSet("trashed_threads", emptySet())?.toMutableSet() ?: mutableSetOf()
+                                trashed.add(threadId)
+                                prefs.edit { putStringSet("trashed_threads", trashed) }
+                                threads = threads.map { 
+                                    if (it.threadId == threadId) it.copy(isDeleted = true) else it 
+                                }
+                            }
+                        }
+                    )
+                    "trash" -> ConversationListScreen(
+                        threads = threads.filter { it.isDeleted },
+                        isLoading = isLoading,
+                        hasPermissions = hasRequiredPermissions,
+                        isTrashView = true,
+                        onSettingsClick = { currentScreen = "settings" },
+                        onBack = { currentScreen = "threads" },
+                        onThreadClick = { thread -> 
+                            selectedThreadId = thread.threadId
+                            selectedContactName = thread.contactName ?: thread.address
+                            selectedAddress = thread.address
+                            returnToScreen = "trash"
+                            currentScreen = "chat"
+                        },
+                        onNewChat = { currentScreen = "new_chat" },
+                        onDeleteThread = { threadId ->
+                            scope.launch {
                                 deleteThread(context, threadId)
                                 threads = threads.filter { it.threadId != threadId }
+                                val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+                                val trashed = prefs.getStringSet("trashed_threads", emptySet())?.toMutableSet() ?: mutableSetOf()
+                                trashed.remove(threadId)
+                                prefs.edit { putStringSet("trashed_threads", trashed) }
+                            }
+                        },
+                        onRestoreThread = { threadId ->
+                            scope.launch {
+                                val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+                                val trashed = prefs.getStringSet("trashed_threads", emptySet())?.toMutableSet() ?: mutableSetOf()
+                                trashed.remove(threadId)
+                                prefs.edit { putStringSet("trashed_threads", trashed) }
+                                threads = threads.map { 
+                                    if (it.threadId == threadId) it.copy(isDeleted = false) else it 
+                                }
                             }
                         }
                     )
@@ -372,12 +424,15 @@ fun ConversationListScreen(
     isLoading: Boolean,
     hasPermissions: Boolean,
     isSpamView: Boolean = false,
+    isTrashView: Boolean = false,
     onSettingsClick: () -> Unit,
     onSpamClick: () -> Unit = {},
+    onTrashClick: () -> Unit = {},
     onBack: () -> Unit = {},
     onThreadClick: (MessageThread) -> Unit,
     onNewChat: () -> Unit,
-    onDeleteThread: (String) -> Unit
+    onDeleteThread: (String) -> Unit,
+    onRestoreThread: (String) -> Unit = {}
 ) {
     var threadToDelete by rememberSaveable { mutableStateOf<MessageThread?>(null) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -397,9 +452,9 @@ fun ConversationListScreen(
 
     Scaffold(
         topBar = {
-            if (isSpamView) {
+            if (isSpamView || isTrashView) {
                 TopAppBar(
-                    title = { Text("Spam & Blocked") },
+                    title = { Text(if (isTrashView) "Trash" else "Spam & Blocked") },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -409,7 +464,7 @@ fun ConversationListScreen(
             }
         },
         floatingActionButton = {
-            if (!isSearchActive && !isSpamView) {
+            if (!isSearchActive && !isSpamView && !isTrashView) {
                 FloatingActionButton(onClick = onNewChat) {
                     Icon(Icons.Default.Add, contentDescription = "New Message")
                 }
@@ -417,7 +472,7 @@ fun ConversationListScreen(
         }
     ) { p ->
         Column(modifier = Modifier.fillMaxSize().padding(p)) {
-            if (!isSpamView) {
+            if (!isSpamView && !isTrashView) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -447,7 +502,10 @@ fun ConversationListScreen(
                                     } else {
                                         Row {
                                             IconButton(onClick = onSpamClick) {
-                                                Icon(Icons.Default.Delete, contentDescription = "Spam & Blocked", tint = MaterialTheme.colorScheme.outline)
+                                                Icon(Icons.Default.Warning, contentDescription = "Spam & Blocked", tint = MaterialTheme.colorScheme.outline)
+                                            }
+                                            IconButton(onClick = onTrashClick) {
+                                                Icon(Icons.Default.Delete, contentDescription = "Trash", tint = MaterialTheme.colorScheme.outline)
                                             }
                                             IconButton(onClick = onSettingsClick) {
                                                 Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -472,7 +530,8 @@ fun ConversationListScreen(
                                         isSearchActive = false
                                         onThreadClick(thread)
                                     },
-                                    onDelete = { threadToDelete = thread }
+                                    onDelete = { threadToDelete = thread },
+                                    onRestore = if (isTrashView) { { onRestoreThread(thread.threadId) } } else null
                                 )
                                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                             }
@@ -494,7 +553,7 @@ fun ConversationListScreen(
                     }
                 } else if (threads.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No messages found", style = MaterialTheme.typography.bodyLarge)
+                        Text(if (isTrashView) "Trash is empty" else "No messages found", style = MaterialTheme.typography.bodyLarge)
                     }
                 } else if (filteredThreads.isEmpty() && searchQuery.isNotEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -506,7 +565,8 @@ fun ConversationListScreen(
                             ThreadItem(
                                 thread, 
                                 onClick = { onThreadClick(thread) },
-                                onDelete = { threadToDelete = thread }
+                                onDelete = { threadToDelete = thread },
+                                onRestore = if (isTrashView) { { onRestoreThread(thread.threadId) } } else null
                             )
                             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                         }
@@ -519,14 +579,16 @@ fun ConversationListScreen(
     if (threadToDelete != null) {
         AlertDialog(
             onDismissRequest = { threadToDelete = null },
-            title = { Text("Delete Conversation?") },
-            text = { Text("Are you sure you want to delete the conversation with ${threadToDelete?.contactName ?: threadToDelete?.address}?") },
+            title = { Text(if (isTrashView) "Delete Permanently?" else "Delete Conversation?") },
+            text = { Text(if (isTrashView) 
+                "Are you sure you want to permanently delete the conversation with ${threadToDelete?.contactName ?: threadToDelete?.address}? This cannot be undone." 
+                else "Are you sure you want to move the conversation with ${threadToDelete?.contactName ?: threadToDelete?.address} to Trash?") },
             confirmButton = {
                 TextButton(onClick = {
                     onDeleteThread(threadToDelete!!.threadId)
                     threadToDelete = null
                 }) {
-                    Text("Delete", color = Color.Red)
+                    Text(if (isTrashView) "Delete Forever" else "Move to Trash", color = Color.Red)
                 }
             },
             dismissButton = {
@@ -539,7 +601,7 @@ fun ConversationListScreen(
 }
 
 @Composable
-fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit) {
+fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit, onRestore: (() -> Unit)? = null) {
     val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
     
     Row(
@@ -572,6 +634,16 @@ fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit)
             )
         }
         
+        if (onRestore != null) {
+            IconButton(onClick = onRestore) {
+                Icon(
+                    Icons.Default.Refresh, 
+                    contentDescription = "Restore Thread",
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                )
+            }
+        }
+
         IconButton(onClick = onDelete) {
             Icon(
                 Icons.Default.Delete, 
@@ -1048,7 +1120,7 @@ fun StatusRow(label: String, status: Boolean) {
 private fun saveThreadsToCache(context: Context, threads: List<MessageThread>) {
     val prefs = context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE)
     val serialized = threads.take(30).joinToString("||") { 
-        "${it.threadId}|${it.address}|${it.contactName ?: ""}|${it.snippet.replace("\n", " ")}|${it.date}|${it.read}|${it.isSpam}" 
+        "${it.threadId}|${it.address}|${it.contactName ?: ""}|${it.snippet.replace("\n", " ")}|${it.date}|${it.read}|${it.isSpam}|${it.isDeleted}" 
     }
     prefs.edit { putString("cached_list", serialized) }
 }
@@ -1066,7 +1138,8 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
                 parts[3], 
                 parts[4].toLong(), 
                 parts[5].toBoolean(),
-                if (parts.size > 6) parts[6].toBoolean() else false
+                if (parts.size > 6) parts[6].toBoolean() else false,
+                if (parts.size > 7) parts[7].toBoolean() else false
             )
         }
     } catch (_: Exception) {
@@ -1311,11 +1384,15 @@ private suspend fun resolveThreadDetails(context: Context, threads: List<Message
     }
 
     // 3. Resolve missing snippets and apply names/spam status
+    val trashedThreads = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+        .getStringSet("trashed_threads", emptySet()) ?: emptySet()
+
     threads.map { thread ->
         val normalized = thread.address.replace(Regex("[^0-9+]"), "")
         val name = contactMap[normalized] ?: fetchContactName(contentResolver, thread.address)
         val isBlocked = blockedNumbers.contains(normalized)
-        thread.copy(contactName = name, isSpam = thread.isSpam || isBlocked)
+        val isDeleted = trashedThreads.contains(thread.threadId)
+        thread.copy(contactName = name, isSpam = thread.isSpam || isBlocked, isDeleted = isDeleted)
     }
 }
 
