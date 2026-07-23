@@ -188,6 +188,10 @@ fun MainNavigation() {
 
     // Cache threads at the navigation level to avoid re-loading when returning from chat
     var threads by remember { mutableStateOf(loadThreadsFromCache(context)) }
+    val deletionPrefs = remember { context.getSharedPreferences("pending_deletions", Context.MODE_PRIVATE) }
+    var pendingDeletions by remember { 
+        mutableStateOf(deletionPrefs.getStringSet("ids", emptySet()) ?: emptySet()) 
+    }
     var isLoading by rememberSaveable { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
     var refreshTrigger by rememberSaveable { mutableIntStateOf(0) }
 
@@ -226,15 +230,18 @@ fun MainNavigation() {
             // This returns almost instantly from the conversation view.
             val baseThreads = fetchThreadsFast(context, contactCache)
             
-            // Merge to prevent UI flicker: if a thread already exists in our state,
-            // don't overwrite its snippet/name with empty values while we are refreshing.
+            // Filter out threads that were recently deleted
+            val filteredBase = baseThreads.filter { it.threadId !in pendingDeletions }
+            
+            // Merge to prevent UI flicker
             threads = if (threads.isEmpty()) {
-                baseThreads
+                filteredBase
             } else {
-                baseThreads.map { new ->
+                filteredBase.map { new ->
                     val existing = threads.find { it.threadId == new.threadId }
                     if (existing != null) {
                         new.copy(
+                            // Only use existing snippet if new one is blank AND we aren't sure it's deleted
                             snippet = new.snippet.ifBlank { existing.snippet },
                             contactName = new.contactName ?: existing.contactName
                         )
@@ -246,16 +253,28 @@ fun MainNavigation() {
             isLoading = false
             
             // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names)
-            // This runs in the background while the user is already looking at the list.
             scope.launch {
                 val updatedWithSnippets = resolveMissingSnippets(context, threads)
-                threads = updatedWithSnippets
+                // Filter again: if snippet is STILL blank after deep sync, it's likely empty
+                val finalFiltered = updatedWithSnippets.filter { 
+                    (it.snippet.isNotBlank() || it.date > 0) && it.threadId !in pendingDeletions 
+                }
+                threads = finalFiltered
                 
-                val finalThreads = resolveThreadDetails(context, updatedWithSnippets)
-                threads = finalThreads
+                val finalThreads = resolveThreadDetails(context, finalFiltered)
+                val cleanedThreads = finalThreads.filter { it.threadId !in pendingDeletions }
+                threads = cleanedThreads
                 
-                // Save to cache for next app launch
-                saveThreadsToCache(context, finalThreads)
+                // Cleanup pending deletions that are no longer returned by the provider
+                val stillInProvider = baseThreads.map { it.threadId }.toSet()
+                val newlyCleaned = pendingDeletions.intersect(stillInProvider)
+                if (newlyCleaned != pendingDeletions) {
+                    pendingDeletions = newlyCleaned
+                    deletionPrefs.edit { putStringSet("ids", newlyCleaned) }
+                }
+                
+                // Save to cache
+                saveThreadsToCache(context, cleanedThreads)
                 contactCache = contactPrefs.all.mapValues { it.value.toString() }
             }
         }
@@ -300,9 +319,14 @@ fun MainNavigation() {
                         },
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThread = { threadId ->
+                            val updatedDeletions = pendingDeletions + threadId
+                            pendingDeletions = updatedDeletions
+                            deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
+                            
                             scope.launch {
                                 deleteThread(context, threadId)
                                 threads = threads.filter { it.threadId != threadId }
+                                saveThreadsToCache(context, threads)
                             }
                         }
                     )
@@ -323,9 +347,14 @@ fun MainNavigation() {
                         },
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThread = { threadId ->
+                            val updatedDeletions = pendingDeletions + threadId
+                            pendingDeletions = updatedDeletions
+                            deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
+
                             scope.launch {
                                 deleteThread(context, threadId)
                                 threads = threads.filter { it.threadId != threadId }
+                                saveThreadsToCache(context, threads)
                             }
                         }
                     )
@@ -1077,15 +1106,15 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
 private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
     val uri = "content://mms-sms/conversations?simple=true".toUri()
-    // Include 'archived' and 'type'
-    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type", "archived")
+    // Include 'archived', 'type' and 'message_count'
+    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type", "archived", "message_count")
     val sortOrder = "date DESC LIMIT 100" // Fetch more to find spam
 
     val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
 
     try {
-        contentResolver.query(uri, projection, null, null, sortOrder)?.use { c ->
+        contentResolver.query(uri, projection, "message_count > 0", null, sortOrder)?.use { c ->
             val idIdx = c.getColumnIndex("_id")
             val snippetIdx = c.getColumnIndex("snippet")
             val dateIdx = c.getColumnIndex("date")
@@ -1093,9 +1122,15 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
             val recipientIdsIdx = c.getColumnIndex("recipient_ids")
             val typeIdx = c.getColumnIndex("type")
             val archivedIdx = c.getColumnIndex("archived")
+            val msgCountIdx = c.getColumnIndex("message_count")
             
             while (c.moveToNext()) {
                 val threadId = c.getString(idIdx) ?: continue
+                
+                // Filter out empty threads
+                val messageCount = if (msgCountIdx != -1) c.getInt(msgCountIdx) else 1
+                if (messageCount == 0) continue
+
                 val snippet = c.getString(snippetIdx) ?: ""
                 val date = c.getLong(dateIdx)
                 val read = c.getInt(readIdx) == 1
@@ -1145,22 +1180,28 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
 private suspend fun fetchThreadsFastLegacy(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
     val uri = "content://mms-sms/conversations?simple=true".toUri()
-    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids")
+    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "message_count")
     val sortOrder = "date DESC LIMIT 30"
 
     val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
 
     try {
-        contentResolver.query(uri, projection, null, null, sortOrder)?.use { c ->
+        contentResolver.query(uri, projection, "message_count > 0", null, sortOrder)?.use { c ->
             val idIdx = c.getColumnIndex("_id")
             val snippetIdx = c.getColumnIndex("snippet")
             val dateIdx = c.getColumnIndex("date")
             val readIdx = c.getColumnIndex("read")
             val recipientIdsIdx = c.getColumnIndex("recipient_ids")
+            val msgCountIdx = c.getColumnIndex("message_count")
             
             while (c.moveToNext()) {
                 val threadId = c.getString(idIdx) ?: continue
+
+                // Filter out empty threads
+                val messageCount = if (msgCountIdx != -1) c.getInt(msgCountIdx) else 1
+                if (messageCount == 0) continue
+
                 val snippet = c.getString(snippetIdx) ?: ""
                 val date = c.getLong(dateIdx)
                 val read = c.getInt(readIdx) == 1
@@ -1555,10 +1596,44 @@ private suspend fun markThreadAsRead(context: Context, threadId: String) = withC
 }
 
 private suspend fun deleteThread(context: Context, threadId: String) = withContext(Dispatchers.IO) {
+    val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    if (!isDefault) {
+        Log.w("SMSBlocker", "Not default SMS app: deleteThread will likely fail.")
+        return@withContext
+    }
+
     try {
-        val uri = "content://mms-sms/conversations/$threadId".toUri()
-        context.contentResolver.delete(uri, null, null)
-        Log.d("SMSBlocker", "Thread $threadId deleted")
+        val contentResolver = context.contentResolver
+        val selection = "${Telephony.Sms.THREAD_ID} = ?"
+        val selectionArgs = arrayOf(threadId)
+
+        // 1. Delete all messages in the thread explicitly
+        contentResolver.delete(Telephony.Sms.CONTENT_URI, selection, selectionArgs)
+        contentResolver.delete(Telephony.Mms.CONTENT_URI, "thread_id = ?", selectionArgs)
+        
+        // 2. Delete the conversation entry itself using multiple possible URIs
+        val uris = listOf(
+            "content://mms-sms/conversations/$threadId".toUri(),
+            "content://sms/conversations/$threadId".toUri(),
+            "content://mms-sms/conversations".toUri()
+        )
+        
+        var deletedCount = 0
+        for (uri in uris) {
+            try {
+                val count = if (uri.toString().endsWith("conversations")) {
+                    contentResolver.delete(uri, "_id = ?", arrayOf(threadId))
+                } else {
+                    contentResolver.delete(uri, null, null)
+                }
+                deletedCount += count
+                Log.d("SMSBlocker", "Attempted delete on $uri, count: $count")
+            } catch (e: Exception) {
+                Log.w("SMSBlocker", "Failed delete on $uri: ${e.message}")
+            }
+        }
+        
+        Log.d("SMSBlocker", "Thread $threadId deletion process finished (total rows: $deletedCount)")
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to delete thread", e)
     }
