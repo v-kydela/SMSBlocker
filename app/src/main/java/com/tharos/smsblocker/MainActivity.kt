@@ -16,6 +16,7 @@ import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -1598,44 +1599,58 @@ private suspend fun markThreadAsRead(context: Context, threadId: String) = withC
 private suspend fun deleteThread(context: Context, threadId: String) = withContext(Dispatchers.IO) {
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     if (!isDefault) {
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Please set SMS Blocker as default to delete messages", Toast.LENGTH_LONG).show()
+        }
         Log.w("SMSBlocker", "Not default SMS app: deleteThread will likely fail.")
         return@withContext
     }
 
     try {
         val contentResolver = context.contentResolver
-        val selection = "${Telephony.Sms.THREAD_ID} = ?"
-        val selectionArgs = arrayOf(threadId)
-
-        // 1. Delete all messages in the thread explicitly
-        contentResolver.delete(Telephony.Sms.CONTENT_URI, selection, selectionArgs)
-        contentResolver.delete(Telephony.Mms.CONTENT_URI, "thread_id = ?", selectionArgs)
         
-        // 2. Delete the conversation entry itself using multiple possible URIs
-        val uris = listOf(
+        // 1. Delete the conversation entry itself - this usually deletes associated messages too
+        // Try multiple URIs to ensure compatibility
+        val threadUris = listOf(
             "content://mms-sms/conversations/$threadId".toUri(),
-            "content://sms/conversations/$threadId".toUri(),
-            "content://mms-sms/conversations".toUri()
+            "content://sms/conversations/$threadId".toUri()
         )
         
-        var deletedCount = 0
-        for (uri in uris) {
+        var totalDeleted = 0
+        for (uri in threadUris) {
             try {
-                val count = if (uri.toString().endsWith("conversations")) {
-                    contentResolver.delete(uri, "_id = ?", arrayOf(threadId))
-                } else {
-                    contentResolver.delete(uri, null, null)
-                }
-                deletedCount += count
-                Log.d("SMSBlocker", "Attempted delete on $uri, count: $count")
+                val count = contentResolver.delete(uri, null, null)
+                totalDeleted += count
+                Log.d("SMSBlocker", "Deleted from $uri: $count")
             } catch (e: Exception) {
-                Log.w("SMSBlocker", "Failed delete on $uri: ${e.message}")
+                Log.w("SMSBlocker", "Failed to delete from $uri: ${e.message}")
             }
         }
+
+        // 2. Explicitly delete messages if thread deletion didn't clear them
+        val smsDeleted = contentResolver.delete(
+            Telephony.Sms.CONTENT_URI,
+            "${Telephony.Sms.THREAD_ID} = ?",
+            arrayOf(threadId)
+        )
+        val mmsDeleted = contentResolver.delete(
+            Telephony.Mms.CONTENT_URI,
+            "thread_id = ?",
+            arrayOf(threadId)
+        )
         
-        Log.d("SMSBlocker", "Thread $threadId deletion process finished (total rows: $deletedCount)")
+        Log.d("SMSBlocker", "Explicit message delete: SMS=$smsDeleted, MMS=$mmsDeleted")
+        
+        if (totalDeleted == 0 && smsDeleted == 0 && mmsDeleted == 0) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "System refused to delete this thread", Toast.LENGTH_SHORT).show()
+            }
+        }
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to delete thread", e)
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Error deleting: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 }
 
