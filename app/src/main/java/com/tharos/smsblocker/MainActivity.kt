@@ -49,13 +49,17 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -329,6 +333,15 @@ fun MainNavigation() {
                                 threads = threads.filter { it.threadId != threadId }
                                 saveThreadsToCache(context, threads)
                             }
+                        },
+                        onBlockThread = { thread ->
+                            scope.launch {
+                                blockNumber(context, thread.address)
+                                markThreadAsSpam(context, thread.threadId, true)
+                                threads = threads.map { 
+                                    if (it.threadId == thread.threadId) it.copy(isSpam = true) else it 
+                                }
+                            }
                         }
                     )
                     "spam" -> ConversationListScreen(
@@ -357,6 +370,15 @@ fun MainNavigation() {
                                 threads = threads.filter { it.threadId != threadId }
                                 saveThreadsToCache(context, threads)
                             }
+                        },
+                        onUnblockThread = { thread ->
+                            scope.launch {
+                                unblockNumber(context, thread.address)
+                                markThreadAsSpam(context, thread.threadId, false)
+                                threads = threads.map { 
+                                    if (it.threadId == thread.threadId) it.copy(isSpam = false) else it 
+                                }
+                            }
                         }
                     )
                     "chat" -> ChatScreen(
@@ -365,7 +387,15 @@ fun MainNavigation() {
                         address = selectedAddress!!,
                         refreshTrigger = refreshTrigger,
                         onBack = { currentScreen = returnToScreen },
-                        onImageClick = { selectedImageUri = it }
+                        onImageClick = { selectedImageUri = it },
+                        onBlockReport = {
+                            scope.launch {
+                                blockNumber(context, selectedAddress!!)
+                                markThreadAsSpam(context, selectedThreadId!!, true)
+                                currentScreen = returnToScreen
+                                refreshTrigger++
+                            }
+                        }
                     )
                     "new_chat" -> NewChatScreen(
                         onBack = { currentScreen = "threads" },
@@ -380,7 +410,16 @@ fun MainNavigation() {
                         address = selectedAddress!!,
                         refreshTrigger = refreshTrigger,
                         onBack = { currentScreen = returnToScreen },
-                        onImageClick = { selectedImageUri = it }
+                        onImageClick = { selectedImageUri = it },
+                        onBlockReport = {
+                            scope.launch {
+                                blockNumber(context, selectedAddress!!)
+                                val tid = fetchThreadIdByAddress(context, selectedAddress!!)
+                                if (tid != null) markThreadAsSpam(context, tid, true)
+                                currentScreen = returnToScreen
+                                refreshTrigger++
+                            }
+                        }
                     )
                     "settings" -> SmsBlockerSettingsScreen(
                         onBack = { currentScreen = "threads" }
@@ -407,9 +446,12 @@ fun ConversationListScreen(
     onBack: () -> Unit = {},
     onThreadClick: (MessageThread) -> Unit,
     onNewChat: () -> Unit,
-    onDeleteThread: (String) -> Unit
+    onDeleteThread: (String) -> Unit,
+    onBlockThread: (MessageThread) -> Unit = {},
+    onUnblockThread: (MessageThread) -> Unit = {}
 ) {
     var threadToDelete by rememberSaveable { mutableStateOf<MessageThread?>(null) }
+    var threadToBlock by rememberSaveable { mutableStateOf<MessageThread?>(null) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
 
@@ -502,7 +544,10 @@ fun ConversationListScreen(
                                         isSearchActive = false
                                         onThreadClick(thread)
                                     },
-                                    onDelete = { threadToDelete = thread }
+                                    onDelete = { threadToDelete = thread },
+                                    onBlock = { threadToBlock = thread },
+                                    onUnblock = { onUnblockThread(thread) },
+                                    isSpamView = isSpamView
                                 )
                                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                             }
@@ -536,7 +581,10 @@ fun ConversationListScreen(
                             ThreadItem(
                                 thread, 
                                 onClick = { onThreadClick(thread) },
-                                onDelete = { threadToDelete = thread }
+                                onDelete = { threadToDelete = thread },
+                                onBlock = { threadToBlock = thread },
+                                onUnblock = { onUnblockThread(thread) },
+                                isSpamView = isSpamView
                             )
                             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                         }
@@ -566,11 +614,40 @@ fun ConversationListScreen(
             }
         )
     }
+
+    if (threadToBlock != null) {
+        AlertDialog(
+            onDismissRequest = { threadToBlock = null },
+            title = { Text("Block & Report Spam?") },
+            text = { Text("This will block ${threadToBlock?.contactName ?: threadToBlock?.address} and move the conversation to Spam.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onBlockThread(threadToBlock!!)
+                    threadToBlock = null
+                }) {
+                    Text("Block", color = Color.Red)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { threadToBlock = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
-fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit) {
+fun ThreadItem(
+    thread: MessageThread, 
+    onClick: () -> Unit, 
+    onDelete: () -> Unit,
+    onBlock: () -> Unit,
+    onUnblock: () -> Unit,
+    isSpamView: Boolean
+) {
     val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    var showMenu by remember { mutableStateOf(false) }
     
     Row(
         modifier = Modifier
@@ -602,12 +679,45 @@ fun ThreadItem(thread: MessageThread, onClick: () -> Unit, onDelete: () -> Unit)
             )
         }
         
-        IconButton(onClick = onDelete) {
-            Icon(
-                Icons.Default.Delete, 
-                contentDescription = "Delete Thread",
-                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
-            )
+        Box {
+            IconButton(onClick = { showMenu = true }) {
+                Icon(
+                    Icons.Default.MoreVert,
+                    contentDescription = "More options",
+                    tint = MaterialTheme.colorScheme.outline
+                )
+            }
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false }
+            ) {
+                if (isSpamView) {
+                    DropdownMenuItem(
+                        text = { Text("Not Spam / Unblock") },
+                        onClick = {
+                            showMenu = false
+                            onUnblock()
+                        }
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("Block & Report Spam") },
+                        onClick = {
+                            showMenu = false
+                            onBlock()
+                        },
+                        leadingIcon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) }
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Delete") },
+                    onClick = {
+                        showMenu = false
+                        onDelete()
+                    },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
+                )
+            }
         }
     }
 }
@@ -745,7 +855,7 @@ private suspend fun fetchAllContacts(context: Context): List<Contact> = withCont
 }
 
 @Composable
-fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> Unit, onImageClick: (Uri) -> Unit) {
+fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> Unit, onImageClick: (Uri) -> Unit, onBlockReport: () -> Unit = {}) {
     val context = LocalContext.current
     var threadId by rememberSaveable { mutableStateOf<String?>(null) }
     var contactName by rememberSaveable { mutableStateOf(address) }
@@ -756,21 +866,30 @@ fun ChatByAddressScreen(address: String, refreshTrigger: Int = 0, onBack: () -> 
     }
 
     if (threadId != null) {
-        ChatScreen(threadId = threadId!!, contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack, onImageClick = onImageClick)
+        ChatScreen(threadId = threadId!!, contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack, onImageClick = onImageClick, onBlockReport = onBlockReport)
     } else {
-        ChatScreen(threadId = "-1", contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack, onImageClick = onImageClick)
+        ChatScreen(threadId = "-1", contactName = contactName, address = address, refreshTrigger = refreshTrigger, onBack = onBack, onImageClick = onImageClick, onBlockReport = onBlockReport)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(threadId: String, contactName: String, address: String, refreshTrigger: Int = 0, onBack: () -> Unit, onImageClick: (Uri) -> Unit) {
+fun ChatScreen(
+    threadId: String, 
+    contactName: String, 
+    address: String, 
+    refreshTrigger: Int = 0, 
+    onBack: () -> Unit, 
+    onImageClick: (Uri) -> Unit,
+    onBlockReport: () -> Unit = {}
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var messages by rememberSaveable { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var textValue by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     var currentThreadId by rememberSaveable { mutableStateOf(threadId) }
+    var showBlockDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(currentThreadId, refreshTrigger) {
         if (currentThreadId != "-1") {
@@ -788,8 +907,45 @@ fun ChatScreen(threadId: String, contactName: String, address: String, refreshTr
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
+            },
+            actions = {
+                var showMenu by remember { mutableStateOf(false) }
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Block & Report Spam") },
+                        onClick = {
+                            showMenu = false
+                            showBlockDialog = true
+                        },
+                        leadingIcon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) }
+                    )
+                }
             }
         )
+
+        if (showBlockDialog) {
+            AlertDialog(
+                onDismissRequest = { showBlockDialog = false },
+                title = { Text("Block & Report Spam?") },
+                text = { Text("This will block $contactName and move the conversation to Spam.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showBlockDialog = false
+                        onBlockReport()
+                    }) {
+                        Text("Block", color = Color.Red)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showBlockDialog = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
 
         LazyColumn(
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
@@ -1703,6 +1859,56 @@ private fun fetchContactName(contentResolver: ContentResolver, phoneNumber: Stri
         }
     } catch (_: Exception) {
         null
+    }
+}
+
+private suspend fun blockNumber(context: Context, number: String) = withContext(Dispatchers.IO) {
+    val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    if (!isDefault) {
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Please set SMS Blocker as default to block numbers", Toast.LENGTH_LONG).show()
+        }
+        return@withContext
+    }
+
+    try {
+        val values = android.content.ContentValues().apply {
+            put(android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER, number)
+        }
+        context.contentResolver.insert(android.provider.BlockedNumberContract.BlockedNumbers.CONTENT_URI, values)
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Number blocked and reported", Toast.LENGTH_SHORT).show()
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to block number", e)
+    }
+}
+
+private suspend fun unblockNumber(context: Context, number: String) = withContext(Dispatchers.IO) {
+    val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    if (!isDefault) return@withContext
+
+    try {
+        val selection = "${android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER} = ?"
+        val selectionArgs = arrayOf(number)
+        context.contentResolver.delete(android.provider.BlockedNumberContract.BlockedNumbers.CONTENT_URI, selection, selectionArgs)
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Number unblocked", Toast.LENGTH_SHORT).show()
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to unblock number", e)
+    }
+}
+
+private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam: Boolean) = withContext(Dispatchers.IO) {
+    try {
+        val values = android.content.ContentValues().apply {
+            put("archived", if (isSpam) 1 else 0)
+        }
+        val threadUri = "content://mms-sms/conversations/$threadId".toUri()
+        context.contentResolver.update(threadUri, values, null, null)
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to mark thread as spam", e)
     }
 }
 
