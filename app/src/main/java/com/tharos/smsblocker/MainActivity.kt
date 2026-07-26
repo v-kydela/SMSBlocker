@@ -228,17 +228,16 @@ fun MainNavigation() {
 
     // Refresh threads whenever we are on the threads screen OR the database changes
     LaunchedEffect(hasRequiredPermissions, currentScreen, refreshTrigger) {
-        if (hasRequiredPermissions && currentScreen == "threads") {
+        if (hasRequiredPermissions && (currentScreen == "threads" || currentScreen == "spam")) {
             if (threads.isEmpty()) isLoading = true
             
             // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
-            // This returns almost instantly from the conversation view.
             val baseThreads = fetchThreadsFast(context, contactCache)
             
             // Filter out threads that were recently deleted
             val filteredBase = baseThreads.filter { it.threadId !in pendingDeletions }
             
-            // Merge to prevent UI flicker
+            // Merge to prevent UI flicker and "bounce back"
             threads = if (threads.isEmpty()) {
                 filteredBase
             } else {
@@ -246,9 +245,10 @@ fun MainNavigation() {
                     val existing = threads.find { it.threadId == new.threadId }
                     if (existing != null) {
                         new.copy(
-                            // Only use existing snippet if new one is blank AND we aren't sure it's deleted
                             snippet = new.snippet.ifBlank { existing.snippet },
-                            contactName = new.contactName ?: existing.contactName
+                            contactName = new.contactName ?: existing.contactName,
+                            // PRESERVE local spam status if no new messages arrived (avoids stale DB overwrite)
+                            isSpam = if (new.date == existing.date) existing.isSpam else new.isSpam
                         )
                     } else {
                         new
@@ -258,19 +258,25 @@ fun MainNavigation() {
             isLoading = false
             
             // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names)
-            scope.launch {
+            launch {
                 val updatedWithSnippets = resolveMissingSnippets(context, threads)
-                // Filter again: if snippet is STILL blank after deep sync, it's likely empty
                 val finalFiltered = updatedWithSnippets.filter { 
                     (it.snippet.isNotBlank() || it.date > 0) && it.threadId !in pendingDeletions 
                 }
-                threads = finalFiltered
                 
                 val finalThreads = resolveThreadDetails(context, finalFiltered)
-                val cleanedThreads = finalThreads.filter { it.threadId !in pendingDeletions }
-                threads = cleanedThreads
                 
-                // Cleanup pending deletions that are no longer returned by the provider
+                // Merge Phase 2 results carefully, maintaining local state stability
+                threads = finalThreads.map { updated ->
+                    val current = threads.find { it.threadId == updated.threadId }
+                    if (current != null && updated.date == current.date) {
+                        updated.copy(isSpam = current.isSpam)
+                    } else {
+                        updated
+                    }
+                }
+                
+                // Cleanup pending deletions
                 val stillInProvider = baseThreads.map { it.threadId }.toSet()
                 val newlyCleaned = pendingDeletions.intersect(stillInProvider)
                 if (newlyCleaned != pendingDeletions) {
@@ -278,8 +284,7 @@ fun MainNavigation() {
                     deletionPrefs.edit { putStringSet("ids", newlyCleaned) }
                 }
                 
-                // Save to cache
-                saveThreadsToCache(context, cleanedThreads)
+                saveThreadsToCache(context, threads)
                 contactCache = contactPrefs.all.mapValues { it.value.toString() }
             }
         }
@@ -341,6 +346,8 @@ fun MainNavigation() {
                                 threads = threads.map { 
                                     if (it.threadId == thread.threadId) it.copy(isSpam = true) else it 
                                 }
+                                saveThreadsToCache(context, threads)
+                                refreshTrigger++
                             }
                         }
                     )
@@ -378,6 +385,8 @@ fun MainNavigation() {
                                 threads = threads.map { 
                                     if (it.threadId == thread.threadId) it.copy(isSpam = false) else it 
                                 }
+                                saveThreadsToCache(context, threads)
+                                refreshTrigger++
                             }
                         }
                     )
@@ -1889,8 +1898,9 @@ private suspend fun unblockNumber(context: Context, number: String) = withContex
     if (!isDefault) return@withContext
 
     try {
-        val selection = "${android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER} = ?"
-        val selectionArgs = arrayOf(number)
+        val normalized = number.replace(Regex("[^0-9+]"), "")
+        val selection = "${android.provider.BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER} IN (?, ?)"
+        val selectionArgs = arrayOf(number, normalized)
         context.contentResolver.delete(android.provider.BlockedNumberContract.BlockedNumbers.CONTENT_URI, selection, selectionArgs)
         withContext(Dispatchers.Main) {
             Toast.makeText(context, "Number unblocked", Toast.LENGTH_SHORT).show()
@@ -1901,14 +1911,24 @@ private suspend fun unblockNumber(context: Context, number: String) = withContex
 }
 
 private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam: Boolean) = withContext(Dispatchers.IO) {
-    try {
-        val values = android.content.ContentValues().apply {
-            put("archived", if (isSpam) 1 else 0)
+    val contentResolver = context.contentResolver
+    val values = android.content.ContentValues().apply {
+        put("archived", if (isSpam) 1 else 0)
+        put("type", if (isSpam) 4 else 0)
+    }
+    
+    // Attempt multiple URIs to ensure compatibility across different Android versions/vendors
+    val uris = listOf(
+        "content://mms-sms/conversations/$threadId".toUri(),
+        "content://sms/conversations/$threadId".toUri()
+    )
+    
+    for (uri in uris) {
+        try {
+            contentResolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            Log.w("SMSBlocker", "Failed to update spam status at $uri: ${e.message}")
         }
-        val threadUri = "content://mms-sms/conversations/$threadId".toUri()
-        context.contentResolver.update(threadUri, values, null, null)
-    } catch (e: Exception) {
-        Log.e("SMSBlocker", "Failed to mark thread as spam", e)
     }
 }
 
