@@ -231,24 +231,35 @@ fun MainNavigation() {
         if (hasRequiredPermissions && (currentScreen == "threads" || currentScreen == "spam")) {
             if (threads.isEmpty()) isLoading = true
             
-            // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
+            val keywords = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+                .getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
+            val manualSpam = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
+                .getStringSet("addresses", emptySet()) ?: emptySet()
+
+            // Phase 1: Fast Fetch
             val baseThreads = fetchThreadsFast(context, contactCache)
             
-            // Filter out threads that were recently deleted
-            val filteredBase = baseThreads.filter { it.threadId !in pendingDeletions }
+            // Apply keyword and manual list filters to Phase 1 results
+            val baseWithSpamCheck = baseThreads.map { t ->
+                val isKeywordSpam = keywords.any { t.snippet.contains(it, ignoreCase = true) }
+                val isManualSpam = manualSpam.contains(t.address)
+                t.copy(isSpam = t.isSpam || isKeywordSpam || isManualSpam)
+            }
             
-            // Merge to prevent UI flicker and "bounce back"
+            val filteredBase = baseWithSpamCheck.filter { it.threadId !in pendingDeletions }
+            
             threads = if (threads.isEmpty()) {
                 filteredBase
             } else {
                 filteredBase.map { new ->
                     val existing = threads.find { it.threadId == new.threadId }
                     if (existing != null) {
+                        // Resilient date check (allow 2s difference)
+                        val isSameVersion = abs(new.date - existing.date) < 2000
                         new.copy(
                             snippet = new.snippet.ifBlank { existing.snippet },
                             contactName = new.contactName ?: existing.contactName,
-                            // PRESERVE local spam status if no new messages arrived (avoids stale DB overwrite)
-                            isSpam = if (new.date == existing.date) existing.isSpam else new.isSpam
+                            isSpam = if (isSameVersion) existing.isSpam else new.isSpam
                         )
                     } else {
                         new
@@ -257,7 +268,7 @@ fun MainNavigation() {
             }
             isLoading = false
             
-            // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names)
+            // Phase 2: Background Deep Sync
             launch {
                 val updatedWithSnippets = resolveMissingSnippets(context, threads)
                 val finalFiltered = updatedWithSnippets.filter { 
@@ -266,17 +277,18 @@ fun MainNavigation() {
                 
                 val finalThreads = resolveThreadDetails(context, finalFiltered)
                 
-                // Merge Phase 2 results carefully, maintaining local state stability
+                // Final merge with Phase 2 results
                 threads = finalThreads.map { updated ->
                     val current = threads.find { it.threadId == updated.threadId }
-                    if (current != null && updated.date == current.date) {
+                    if (current != null && abs(updated.date - current.date) < 2000) {
                         updated.copy(isSpam = current.isSpam)
                     } else {
-                        updated
+                        val isKeywordSpam = keywords.any { updated.snippet.contains(it, ignoreCase = true) }
+                        val isManualSpam = manualSpam.contains(updated.address)
+                        updated.copy(isSpam = updated.isSpam || isKeywordSpam || isManualSpam)
                     }
                 }
                 
-                // Cleanup pending deletions
                 val stillInProvider = baseThreads.map { it.threadId }.toSet()
                 val newlyCleaned = pendingDeletions.intersect(stillInProvider)
                 if (newlyCleaned != pendingDeletions) {
@@ -1873,9 +1885,15 @@ private fun fetchContactName(contentResolver: ContentResolver, phoneNumber: Stri
 
 private suspend fun blockNumber(context: Context, number: String) = withContext(Dispatchers.IO) {
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    
+    // Always track in local manual list
+    val manualPrefs = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
+    val current = manualPrefs.getStringSet("addresses", emptySet()) ?: emptySet()
+    manualPrefs.edit { putStringSet("addresses", current + number) }
+
     if (!isDefault) {
         withContext(Dispatchers.Main) {
-            Toast.makeText(context, "Please set SMS Blocker as default to block numbers", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Added to local block list. Set as default to sync with system.", Toast.LENGTH_LONG).show()
         }
         return@withContext
     }
@@ -1894,6 +1912,11 @@ private suspend fun blockNumber(context: Context, number: String) = withContext(
 }
 
 private suspend fun unblockNumber(context: Context, number: String) = withContext(Dispatchers.IO) {
+    // Remove from local manual list
+    val manualPrefs = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
+    val current = manualPrefs.getStringSet("addresses", emptySet()) ?: emptySet()
+    manualPrefs.edit { putStringSet("addresses", current - number) }
+
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     if (!isDefault) return@withContext
 
