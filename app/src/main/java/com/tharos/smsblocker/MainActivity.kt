@@ -134,7 +134,8 @@ data class MessageThread(
     val snippet: String,
     val date: Long,
     val read: Boolean,
-    val isSpam: Boolean = false
+    val isSpam: Boolean = false,
+    val isArchived: Boolean = false
 ) : Parcelable
 
 @Parcelize
@@ -228,7 +229,7 @@ fun MainNavigation() {
 
     // Refresh threads whenever we are on the threads screen OR the database changes
     LaunchedEffect(hasRequiredPermissions, currentScreen, refreshTrigger) {
-        if (hasRequiredPermissions && (currentScreen == "threads" || currentScreen == "spam")) {
+        if (hasRequiredPermissions && (currentScreen == "threads" || currentScreen == "spam" || currentScreen == "archived")) {
             if (threads.isEmpty()) isLoading = true
             
             val keywords = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
@@ -236,14 +237,17 @@ fun MainNavigation() {
             val manualSpam = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
                 .getStringSet("addresses", emptySet()) ?: emptySet()
 
-            // Phase 1: Fast Fetch
+            // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
+            // This returns almost instantly from the conversation view.
             val baseThreads = fetchThreadsFast(context, contactCache)
             
-            // Apply keyword and manual list filters to Phase 1 results
+            // Apply filtering logic
             val baseWithSpamCheck = baseThreads.map { t ->
                 val isKeywordSpam = keywords.any { t.snippet.contains(it, ignoreCase = true) }
                 val isManualSpam = manualSpam.contains(t.address)
-                t.copy(isSpam = t.isSpam || isKeywordSpam || isManualSpam)
+                // Note: thread.isSpam from fetchThreadsFast is based on 'archived' or 'type'
+                // We will now treat 'archived' as ARCHIVED, and keywords/manual list as SPAM.
+                t.copy(isSpam = isKeywordSpam || isManualSpam)
             }
             
             val filteredBase = baseWithSpamCheck.filter { it.threadId !in pendingDeletions }
@@ -254,7 +258,7 @@ fun MainNavigation() {
                 filteredBase.map { new ->
                     val existing = threads.find { it.threadId == new.threadId }
                     if (existing != null) {
-                        // Resilient date check (allow 2s difference)
+                        // PRESERVE local spam status if no new messages arrived (avoids stale DB overwrite)
                         val isSameVersion = abs(new.date - existing.date) < 2000
                         new.copy(
                             snippet = new.snippet.ifBlank { existing.snippet },
@@ -268,9 +272,16 @@ fun MainNavigation() {
             }
             isLoading = false
             
-            // Phase 2: Background Deep Sync
+            // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names) & Auto-Delete
             launch {
+                // Auto-delete spam older than 7 days
+                val sevenDaysAgo = System.currentTimeMillis() - (7 * 24 * 60 * 60 * 1000)
+                threads.filter { it.isSpam && it.date < sevenDaysAgo }.forEach { 
+                    deleteThread(context, it.threadId)
+                }
+
                 val updatedWithSnippets = resolveMissingSnippets(context, threads)
+                // Filter again: if snippet is STILL blank after deep sync, it's likely empty
                 val finalFiltered = updatedWithSnippets.filter { 
                     (it.snippet.isNotBlank() || it.date > 0) && it.threadId !in pendingDeletions 
                 }
@@ -285,10 +296,11 @@ fun MainNavigation() {
                     } else {
                         val isKeywordSpam = keywords.any { updated.snippet.contains(it, ignoreCase = true) }
                         val isManualSpam = manualSpam.contains(updated.address)
-                        updated.copy(isSpam = updated.isSpam || isKeywordSpam || isManualSpam)
+                        updated.copy(isSpam = isKeywordSpam || isManualSpam)
                     }
                 }
                 
+                // Cleanup pending deletions that are no longer returned by the provider
                 val stillInProvider = baseThreads.map { it.threadId }.toSet()
                 val newlyCleaned = pendingDeletions.intersect(stillInProvider)
                 if (newlyCleaned != pendingDeletions) {
@@ -317,11 +329,12 @@ fun MainNavigation() {
             Box(modifier = Modifier.padding(padding)) {
                 when (currentScreen) {
                     "threads" -> ConversationListScreen(
-                        threads = threads.filter { !it.isSpam },
+                        threads = threads.filter { !it.isSpam && !it.isArchived },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
                         onSettingsClick = { currentScreen = "settings" },
                         onSpamClick = { currentScreen = "spam" },
+                        onArchiveClick = { currentScreen = "archived" },
                         onThreadClick = { thread -> 
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
@@ -354,12 +367,21 @@ fun MainNavigation() {
                         onBlockThread = { thread ->
                             scope.launch {
                                 blockNumber(context, thread.address)
-                                markThreadAsSpam(context, thread.threadId, true)
+                                // We no longer mark as archived in the DB for spam
                                 threads = threads.map { 
                                     if (it.threadId == thread.threadId) it.copy(isSpam = true) else it 
                                 }
                                 saveThreadsToCache(context, threads)
                                 refreshTrigger++
+                            }
+                        },
+                        onArchiveThread = { thread ->
+                            scope.launch {
+                                markThreadArchived(context, thread.threadId, true)
+                                threads = threads.map { 
+                                    if (it.threadId == thread.threadId) it.copy(isArchived = true) else it 
+                                }
+                                saveThreadsToCache(context, threads)
                             }
                         }
                     )
@@ -369,7 +391,6 @@ fun MainNavigation() {
                         hasPermissions = hasRequiredPermissions,
                         isSpamView = true,
                         onSettingsClick = { currentScreen = "settings" },
-                        onSpamClick = { }, // already there
                         onBack = { currentScreen = "threads" },
                         onThreadClick = { thread -> 
                             selectedThreadId = thread.threadId
@@ -393,12 +414,47 @@ fun MainNavigation() {
                         onUnblockThread = { thread ->
                             scope.launch {
                                 unblockNumber(context, thread.address)
-                                markThreadAsSpam(context, thread.threadId, false)
                                 threads = threads.map { 
                                     if (it.threadId == thread.threadId) it.copy(isSpam = false) else it 
                                 }
                                 saveThreadsToCache(context, threads)
                                 refreshTrigger++
+                            }
+                        }
+                    )
+                    "archived" -> ConversationListScreen(
+                        threads = threads.filter { it.isArchived && !it.isSpam },
+                        isLoading = isLoading,
+                        hasPermissions = hasRequiredPermissions,
+                        isArchiveView = true,
+                        onSettingsClick = { currentScreen = "settings" },
+                        onBack = { currentScreen = "threads" },
+                        onThreadClick = { thread -> 
+                            selectedThreadId = thread.threadId
+                            selectedContactName = thread.contactName ?: thread.address
+                            selectedAddress = thread.address
+                            returnToScreen = "archived"
+                            currentScreen = "chat"
+                        },
+                        onNewChat = { currentScreen = "new_chat" },
+                        onDeleteThread = { threadId ->
+                            val updatedDeletions = pendingDeletions + threadId
+                            pendingDeletions = updatedDeletions
+                            deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
+
+                            scope.launch {
+                                deleteThread(context, threadId)
+                                threads = threads.filter { it.threadId != threadId }
+                                saveThreadsToCache(context, threads)
+                            }
+                        },
+                        onUnarchiveThread = { thread ->
+                            scope.launch {
+                                markThreadArchived(context, thread.threadId, false)
+                                threads = threads.map { 
+                                    if (it.threadId == thread.threadId) it.copy(isArchived = false) else it 
+                                }
+                                saveThreadsToCache(context, threads)
                             }
                         }
                     )
@@ -462,14 +518,18 @@ fun ConversationListScreen(
     isLoading: Boolean,
     hasPermissions: Boolean,
     isSpamView: Boolean = false,
+    isArchiveView: Boolean = false,
     onSettingsClick: () -> Unit,
     onSpamClick: () -> Unit = {},
+    onArchiveClick: () -> Unit = {},
     onBack: () -> Unit = {},
     onThreadClick: (MessageThread) -> Unit,
     onNewChat: () -> Unit,
     onDeleteThread: (String) -> Unit,
     onBlockThread: (MessageThread) -> Unit = {},
-    onUnblockThread: (MessageThread) -> Unit = {}
+    onUnblockThread: (MessageThread) -> Unit = {},
+    onArchiveThread: (MessageThread) -> Unit = {},
+    onUnarchiveThread: (MessageThread) -> Unit = {}
 ) {
     var threadToDelete by rememberSaveable { mutableStateOf<MessageThread?>(null) }
     var threadToBlock by rememberSaveable { mutableStateOf<MessageThread?>(null) }
@@ -490,9 +550,9 @@ fun ConversationListScreen(
 
     Scaffold(
         topBar = {
-            if (isSpamView) {
+            if (isSpamView || isArchiveView) {
                 TopAppBar(
-                    title = { Text("Spam & Blocked") },
+                    title = { Text(if (isSpamView) "Spam" else "Archive") },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -502,7 +562,7 @@ fun ConversationListScreen(
             }
         },
         floatingActionButton = {
-            if (!isSearchActive && !isSpamView) {
+            if (!isSearchActive && !isSpamView && !isArchiveView) {
                 FloatingActionButton(onClick = onNewChat) {
                     Icon(Icons.Default.Add, contentDescription = "New Message")
                 }
@@ -510,7 +570,7 @@ fun ConversationListScreen(
         }
     ) { p ->
         Column(modifier = Modifier.fillMaxSize().padding(p)) {
-            if (!isSpamView) {
+            if (!isSpamView && !isArchiveView) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -539,8 +599,11 @@ fun ConversationListScreen(
                                         }
                                     } else {
                                         Row {
+                                            IconButton(onClick = onArchiveClick) {
+                                                Icon(Icons.Default.Delete, contentDescription = "Archive", tint = MaterialTheme.colorScheme.outline)
+                                            }
                                             IconButton(onClick = onSpamClick) {
-                                                Icon(Icons.Default.Delete, contentDescription = "Spam & Blocked", tint = MaterialTheme.colorScheme.outline)
+                                                Icon(Icons.Default.Warning, contentDescription = "Spam", tint = MaterialTheme.colorScheme.outline)
                                             }
                                             IconButton(onClick = onSettingsClick) {
                                                 Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -568,7 +631,10 @@ fun ConversationListScreen(
                                     onDelete = { threadToDelete = thread },
                                     onBlock = { threadToBlock = thread },
                                     onUnblock = { onUnblockThread(thread) },
-                                    isSpamView = isSpamView
+                                    onArchive = { onArchiveThread(thread) },
+                                    onUnarchive = { onUnarchiveThread(thread) },
+                                    isSpamView = isSpamView,
+                                    isArchiveView = isArchiveView
                                 )
                                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                             }
@@ -590,7 +656,14 @@ fun ConversationListScreen(
                     }
                 } else if (threads.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No messages found", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            text = when {
+                                isSpamView -> "No spam messages"
+                                isArchiveView -> "No archived messages"
+                                else -> "No messages found"
+                            },
+                            style = MaterialTheme.typography.bodyLarge
+                        )
                     }
                 } else if (filteredThreads.isEmpty() && searchQuery.isNotEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -605,7 +678,10 @@ fun ConversationListScreen(
                                 onDelete = { threadToDelete = thread },
                                 onBlock = { threadToBlock = thread },
                                 onUnblock = { onUnblockThread(thread) },
-                                isSpamView = isSpamView
+                                onArchive = { onArchiveThread(thread) },
+                                onUnarchive = { onUnarchiveThread(thread) },
+                                isSpamView = isSpamView,
+                                isArchiveView = isArchiveView
                             )
                             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                         }
@@ -665,7 +741,10 @@ fun ThreadItem(
     onDelete: () -> Unit,
     onBlock: () -> Unit,
     onUnblock: () -> Unit,
-    isSpamView: Boolean
+    onArchive: () -> Unit,
+    onUnarchive: () -> Unit,
+    isSpamView: Boolean,
+    isArchiveView: Boolean
 ) {
     val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
     var showMenu by remember { mutableStateOf(false) }
@@ -720,7 +799,24 @@ fun ThreadItem(
                             onUnblock()
                         }
                     )
+                } else if (isArchiveView) {
+                    DropdownMenuItem(
+                        text = { Text("Unarchive") },
+                        onClick = {
+                            showMenu = false
+                            onUnarchive()
+                        },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) }
+                    )
                 } else {
+                    DropdownMenuItem(
+                        text = { Text("Archive") },
+                        onClick = {
+                            showMenu = false
+                            onArchive()
+                        },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
+                    )
                     DropdownMenuItem(
                         text = { Text("Block & Report Spam") },
                         onClick = {
@@ -1319,7 +1415,7 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
                 val firstId = recipientIds.split(" ").firstOrNull() ?: ""
                 if (firstId.isNotBlank()) recipientIdSet.add(firstId)
                 
-                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = archived || type == 4))
+                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = type == 4, isArchived = archived))
             }
         }
     } catch (e: Exception) {
@@ -1933,10 +2029,24 @@ private suspend fun unblockNumber(context: Context, number: String) = withContex
     }
 }
 
+private suspend fun markThreadArchived(context: Context, threadId: String, archived: Boolean) = withContext(Dispatchers.IO) {
+    val contentResolver = context.contentResolver
+    val values = android.content.ContentValues().apply {
+        put("archived", if (archived) 1 else 0)
+    }
+    val uri = "content://mms-sms/conversations/$threadId".toUri()
+    try {
+        contentResolver.update(uri, values, null, null)
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to update archive status", e)
+    }
+}
+
 private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam: Boolean) = withContext(Dispatchers.IO) {
     val contentResolver = context.contentResolver
     val values = android.content.ContentValues().apply {
         put("archived", if (isSpam) 1 else 0)
+        // Some systems use 'type' column to categorize threads
         put("type", if (isSpam) 4 else 0)
     }
     
