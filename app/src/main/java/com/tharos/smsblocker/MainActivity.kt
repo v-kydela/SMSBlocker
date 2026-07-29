@@ -258,12 +258,13 @@ fun MainNavigation() {
                 filteredBase.map { new ->
                     val existing = threads.find { it.threadId == new.threadId }
                     if (existing != null) {
-                        // PRESERVE local spam status if no new messages arrived (avoids stale DB overwrite)
+                        // PRESERVE local spam/archive status if no new messages arrived (avoids stale DB overwrite)
                         val isSameVersion = abs(new.date - existing.date) < 2000
                         new.copy(
                             snippet = new.snippet.ifBlank { existing.snippet },
                             contactName = new.contactName ?: existing.contactName,
-                            isSpam = if (isSameVersion) existing.isSpam else new.isSpam
+                            isSpam = if (isSameVersion) existing.isSpam else new.isSpam,
+                            isArchived = if (isSameVersion) existing.isArchived else new.isArchived
                         )
                     } else {
                         new
@@ -292,7 +293,10 @@ fun MainNavigation() {
                 threads = finalThreads.map { updated ->
                     val current = threads.find { it.threadId == updated.threadId }
                     if (current != null && abs(updated.date - current.date) < 2000) {
-                        updated.copy(isSpam = current.isSpam)
+                        updated.copy(
+                            isSpam = current.isSpam,
+                            isArchived = current.isArchived
+                        )
                     } else {
                         val isKeywordSpam = keywords.any { updated.snippet.contains(it, ignoreCase = true) }
                         val isManualSpam = manualSpam.contains(updated.address)
@@ -2034,11 +2038,18 @@ private suspend fun markThreadArchived(context: Context, threadId: String, archi
     val values = android.content.ContentValues().apply {
         put("archived", if (archived) 1 else 0)
     }
-    val uri = "content://mms-sms/conversations/$threadId".toUri()
-    try {
-        contentResolver.update(uri, values, null, null)
-    } catch (e: Exception) {
-        Log.e("SMSBlocker", "Failed to update archive status", e)
+    
+    val uris = listOf(
+        "content://mms-sms/conversations/$threadId".toUri(),
+        "content://sms/conversations/$threadId".toUri()
+    )
+    
+    for (uri in uris) {
+        try {
+            contentResolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            Log.w("SMSBlocker", "Failed to update archive status at $uri: ${e.message}")
+        }
     }
 }
 
