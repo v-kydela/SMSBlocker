@@ -1014,10 +1014,13 @@ fun ChatScreen(
 
     LaunchedEffect(currentThreadId, refreshTrigger) {
         if (currentThreadId != "-1") {
-            if (refreshTrigger > 0) {
-                markThreadAsRead(context, currentThreadId)
-            }
             messages = fetchMessagesForThread(context, currentThreadId)
+        }
+    }
+
+    LaunchedEffect(currentThreadId) {
+        if (currentThreadId != "-1") {
+            markThreadAsRead(context, currentThreadId)
         }
     }
 
