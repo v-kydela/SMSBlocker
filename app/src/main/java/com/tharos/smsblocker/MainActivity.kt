@@ -1955,7 +1955,12 @@ private suspend fun fetchThreadIdByAddress(context: Context, address: String): S
 private suspend fun sendMessage(context: Context, address: String, body: String, threadId: String?) = withContext(Dispatchers.IO) {
     try {
         val smsManager = context.getSystemService(SmsManager::class.java)
-        smsManager.sendTextMessage(address, null, body, null, null)
+        val parts = smsManager.divideMessage(body)
+        if (parts.size > 1) {
+            smsManager.sendMultipartTextMessage(address, null, parts, null, null)
+        } else {
+            smsManager.sendTextMessage(address, null, body, null, null)
+        }
         
         val values = android.content.ContentValues().apply {
             put(Telephony.Sms.ADDRESS, address)

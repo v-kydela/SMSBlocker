@@ -19,35 +19,38 @@ class SmsReceiver : BroadcastReceiver() {
             action == Telephony.Sms.Intents.SMS_DELIVER_ACTION) {
             
             val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-            for (message in messages) {
-                val sender = message.displayOriginatingAddress ?: continue
-                val body = message.displayMessageBody ?: ""
-                
-                Log.d("SmsReceiver", "Intercepted SMS from $sender: $body")
-                
-                val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
-                val keywords = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
-                val isSpam = keywords.any { body.contains(it, ignoreCase = true) }
+            if (messages.isNullOrEmpty()) return
 
-                if (isSpam) {
-                    Log.d("SmsReceiver", "Spam keyword detected! Blocking.")
-                    blockSender(context, sender)
-                    
-                    // If we are the default app (receiving SMS_DELIVER), 
-                    // NOT saving it to the database effectively blocks it from appearing.
-                    Toast.makeText(context, "Spam blocked from $sender", Toast.LENGTH_LONG).show()
-                    
-                    // In SMS_RECEIVED (non-default), we can't stop the message 
-                    // from reaching the default app, but we've already blocked the number for the future.
-                } else {
-                    if (action == Telephony.Sms.Intents.SMS_DELIVER_ACTION) {
-                        // If we are the default app and it's NOT spam, 
-                        // we MUST manually save it to the system provider.
-                        saveToTelephony(context, message)
-                    }
-                    // Notify the user about the new legitimate message
-                    showNotification(context, sender, body)
+            // Combine multi-part SMS messages into a single body
+            val firstMessage = messages[0]
+            val sender = firstMessage.displayOriginatingAddress ?: return
+            val body = messages.joinToString("") { it.displayMessageBody ?: "" }
+            val timestamp = firstMessage.timestampMillis
+            
+            Log.d("SmsReceiver", "Intercepted SMS from $sender: $body")
+            
+            val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
+            val keywords = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
+            val isSpam = keywords.any { body.contains(it, ignoreCase = true) }
+
+            if (isSpam) {
+                Log.d("SmsReceiver", "Spam keyword detected! Blocking.")
+                blockSender(context, sender)
+                
+                // If we are the default app (receiving SMS_DELIVER), 
+                // NOT saving it to the database effectively blocks it from appearing.
+                Toast.makeText(context, "Spam blocked from $sender", Toast.LENGTH_LONG).show()
+                
+                // In SMS_RECEIVED (non-default), we can't stop the message 
+                // from reaching the default app, but we've already blocked the number for the future.
+            } else {
+                if (action == Telephony.Sms.Intents.SMS_DELIVER_ACTION) {
+                    // If we are the default app and it's NOT spam, 
+                    // we MUST manually save it to the system provider as a single combined message.
+                    saveToTelephony(context, firstMessage.originatingAddress ?: sender, body, timestamp)
                 }
+                // Notify the user about the new legitimate message
+                showNotification(context, sender, body)
             }
         }
     }
@@ -70,12 +73,12 @@ class SmsReceiver : BroadcastReceiver() {
         notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
     }
 
-    private fun saveToTelephony(context: Context, message: android.telephony.SmsMessage) {
+    private fun saveToTelephony(context: Context, sender: String, body: String, timestamp: Long) {
         try {
             val values = ContentValues().apply {
-                put(Telephony.Sms.ADDRESS, message.originatingAddress)
-                put(Telephony.Sms.BODY, message.messageBody)
-                put(Telephony.Sms.DATE, message.timestampMillis)
+                put(Telephony.Sms.ADDRESS, sender)
+                put(Telephony.Sms.BODY, body)
+                put(Telephony.Sms.DATE, timestamp)
                 put(Telephony.Sms.READ, 0)
                 put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_INBOX)
             }
