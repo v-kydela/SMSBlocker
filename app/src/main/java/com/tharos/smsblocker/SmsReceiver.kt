@@ -15,9 +15,18 @@ import androidx.core.app.NotificationCompat
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action
-        if (action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION || 
-            action == Telephony.Sms.Intents.SMS_DELIVER_ACTION) {
-            
+        val isDefaultApp = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+
+        // Prevent duplicate notifications and processing:
+        // If we are the default app, we only handle SMS_DELIVER_ACTION.
+        // If we are NOT the default app, we handle SMS_RECEIVED_ACTION.
+        val shouldProcess = if (isDefaultApp) {
+            action == Telephony.Sms.Intents.SMS_DELIVER_ACTION
+        } else {
+            action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION
+        }
+
+        if (shouldProcess) {
             val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
             if (messages.isNullOrEmpty()) return
 
