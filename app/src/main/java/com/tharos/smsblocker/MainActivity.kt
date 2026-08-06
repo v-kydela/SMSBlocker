@@ -95,6 +95,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -318,6 +319,62 @@ fun MainNavigation() {
         }
     }
 
+    val performDelete: (String) -> Unit = { threadId ->
+        val updatedDeletions = pendingDeletions + threadId
+        pendingDeletions = updatedDeletions
+        deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
+        scope.launch {
+            deleteThread(context, threadId)
+            threads = threads.filter { it.threadId != threadId }
+            saveThreadsToCache(context, threads)
+        }
+    }
+
+    val performBlock: (String, String) -> Unit = { threadId, address ->
+        scope.launch {
+            blockNumber(context, address)
+            markThreadAsSpam(context, threadId, true)
+            threads = threads.map {
+                if (it.threadId == threadId) it.copy(isSpam = true, isArchived = false) else it
+            }
+            saveThreadsToCache(context, threads)
+            refreshTrigger++
+        }
+    }
+
+    val performUnblock: (String, String) -> Unit = { threadId, address ->
+        scope.launch {
+            unblockNumber(context, address)
+            markThreadAsSpam(context, threadId, false)
+            threads = threads.map {
+                if (it.threadId == threadId) it.copy(isSpam = false) else it
+            }
+            saveThreadsToCache(context, threads)
+            refreshTrigger++
+        }
+    }
+
+    val performArchive: (String) -> Unit = { threadId ->
+        scope.launch {
+            markThreadAsSpam(context, threadId, false)
+            markThreadArchived(context, threadId, true)
+            threads = threads.map {
+                if (it.threadId == threadId) it.copy(isArchived = true, isSpam = false) else it
+            }
+            saveThreadsToCache(context, threads)
+        }
+    }
+
+    val performUnarchive: (String) -> Unit = { threadId ->
+        scope.launch {
+            markThreadArchived(context, threadId, false)
+            threads = threads.map {
+                if (it.threadId == threadId) it.copy(isArchived = false) else it
+            }
+            saveThreadsToCache(context, threads)
+        }
+    }
+
     BackHandler(enabled = currentScreen != "threads" || selectedImageUri != null) {
         if (selectedImageUri != null) {
             selectedImageUri = null
@@ -357,37 +414,9 @@ fun MainNavigation() {
                             }
                         },
                         onNewChat = { currentScreen = "new_chat" },
-                        onDeleteThread = { threadId ->
-                            val updatedDeletions = pendingDeletions + threadId
-                            pendingDeletions = updatedDeletions
-                            deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
-                            
-                            scope.launch {
-                                deleteThread(context, threadId)
-                                threads = threads.filter { it.threadId != threadId }
-                                saveThreadsToCache(context, threads)
-                            }
-                        },
-                        onBlockThread = { thread ->
-                            scope.launch {
-                                blockNumber(context, thread.address)
-                                // We no longer mark as archived in the DB for spam
-                                threads = threads.map { 
-                                    if (it.threadId == thread.threadId) it.copy(isSpam = true) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                                refreshTrigger++
-                            }
-                        },
-                        onArchiveThread = { thread ->
-                            scope.launch {
-                                markThreadArchived(context, thread.threadId, true)
-                                threads = threads.map { 
-                                    if (it.threadId == thread.threadId) it.copy(isArchived = true) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                            }
-                        }
+                        onDeleteThread = performDelete,
+                        onBlockThread = { thread -> performBlock(thread.threadId, thread.address) },
+                        onArchiveThread = { thread -> performArchive(thread.threadId) }
                     )
                     "spam" -> ConversationListScreen(
                         threads = threads.filter { it.isSpam },
@@ -404,37 +433,9 @@ fun MainNavigation() {
                             currentScreen = "chat"
                         },
                         onNewChat = { currentScreen = "new_chat" },
-                        onDeleteThread = { threadId ->
-                            val updatedDeletions = pendingDeletions + threadId
-                            pendingDeletions = updatedDeletions
-                            deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
-
-                            scope.launch {
-                                deleteThread(context, threadId)
-                                threads = threads.filter { it.threadId != threadId }
-                                saveThreadsToCache(context, threads)
-                            }
-                        },
-                        onUnblockThread = { thread ->
-                            scope.launch {
-                                unblockNumber(context, thread.address)
-                                threads = threads.map { 
-                                    if (it.threadId == thread.threadId) it.copy(isSpam = false) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                                refreshTrigger++
-                            }
-                        },
-                        onArchiveThread = { thread ->
-                            scope.launch {
-                                markThreadAsSpam(context, thread.threadId, false)
-                                markThreadArchived(context, thread.threadId, true)
-                                threads = threads.map { 
-                                    if (it.threadId == thread.threadId) it.copy(isSpam = false, isArchived = true) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                            }
-                        }
+                        onDeleteThread = performDelete,
+                        onUnblockThread = { thread -> performUnblock(thread.threadId, thread.address) },
+                        onArchiveThread = { thread -> performArchive(thread.threadId) }
                     )
                     "archived" -> ConversationListScreen(
                         threads = threads.filter { it.isArchived && !it.isSpam },
@@ -451,37 +452,9 @@ fun MainNavigation() {
                             currentScreen = "chat"
                         },
                         onNewChat = { currentScreen = "new_chat" },
-                        onDeleteThread = { threadId ->
-                            val updatedDeletions = pendingDeletions + threadId
-                            pendingDeletions = updatedDeletions
-                            deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
-
-                            scope.launch {
-                                deleteThread(context, threadId)
-                                threads = threads.filter { it.threadId != threadId }
-                                saveThreadsToCache(context, threads)
-                            }
-                        },
-                        onUnarchiveThread = { thread ->
-                            scope.launch {
-                                markThreadArchived(context, thread.threadId, false)
-                                threads = threads.map { 
-                                    if (it.threadId == thread.threadId) it.copy(isArchived = false) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                            }
-                        },
-                        onBlockThread = { thread ->
-                            scope.launch {
-                                blockNumber(context, thread.address)
-                                markThreadAsSpam(context, thread.threadId, true)
-                                threads = threads.map { 
-                                    if (it.threadId == thread.threadId) it.copy(isSpam = true) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                                refreshTrigger++
-                            }
-                        }
+                        onDeleteThread = performDelete,
+                        onUnarchiveThread = { thread -> performUnarchive(thread.threadId) },
+                        onBlockThread = { thread -> performBlock(thread.threadId, thread.address) }
                     )
                     "chat" -> ChatScreen(
                         threadId = selectedThreadId!!,
@@ -493,62 +466,24 @@ fun MainNavigation() {
                         isSpamView = returnToScreen == "spam",
                         isArchiveView = returnToScreen == "archived",
                         onDelete = {
-                            val tid = selectedThreadId!!
-                            val updatedDeletions = pendingDeletions + tid
-                            pendingDeletions = updatedDeletions
-                            deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
-                            scope.launch {
-                                deleteThread(context, tid)
-                                threads = threads.filter { it.threadId != tid }
-                                saveThreadsToCache(context, threads)
-                                currentScreen = returnToScreen
-                            }
+                            performDelete(selectedThreadId!!)
+                            currentScreen = returnToScreen
                         },
                         onBlock = {
-                            scope.launch {
-                                blockNumber(context, selectedAddress!!)
-                                markThreadAsSpam(context, selectedThreadId!!, true)
-                                threads = threads.map { 
-                                    if (it.threadId == selectedThreadId) it.copy(isSpam = true) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                                currentScreen = returnToScreen
-                                refreshTrigger++
-                            }
+                            performBlock(selectedThreadId!!, selectedAddress!!)
+                            currentScreen = returnToScreen
                         },
                         onUnblock = {
-                            scope.launch {
-                                unblockNumber(context, selectedAddress!!)
-                                threads = threads.map { 
-                                    if (it.threadId == selectedThreadId) it.copy(isSpam = false) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                                currentScreen = returnToScreen
-                                refreshTrigger++
-                            }
+                            performUnblock(selectedThreadId!!, selectedAddress!!)
+                            currentScreen = returnToScreen
                         },
                         onArchive = {
-                            scope.launch {
-                                if (returnToScreen == "spam") {
-                                    markThreadAsSpam(context, selectedThreadId!!, false)
-                                }
-                                markThreadArchived(context, selectedThreadId!!, true)
-                                threads = threads.map { 
-                                    if (it.threadId == selectedThreadId) it.copy(isArchived = true, isSpam = false) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                                currentScreen = returnToScreen
-                            }
+                            performArchive(selectedThreadId!!)
+                            currentScreen = returnToScreen
                         },
                         onUnarchive = {
-                            scope.launch {
-                                markThreadArchived(context, selectedThreadId!!, false)
-                                threads = threads.map { 
-                                    if (it.threadId == selectedThreadId) it.copy(isArchived = false) else it 
-                                }
-                                saveThreadsToCache(context, threads)
-                                currentScreen = returnToScreen
-                            }
+                            performUnarchive(selectedThreadId!!)
+                            currentScreen = returnToScreen
                         }
                     )
                     "new_chat" -> NewChatScreen(
@@ -567,40 +502,22 @@ fun MainNavigation() {
                         onImageClick = { selectedImageUri = it },
                         onBlock = {
                             scope.launch {
-                                blockNumber(context, selectedAddress!!)
-                                val tid = fetchThreadIdByAddress(context, selectedAddress!!)
-                                if (tid != null) {
-                                    markThreadAsSpam(context, tid, true)
-                                    threads = threads.map { 
-                                        if (it.threadId == tid) it.copy(isSpam = true) else it 
-                                    }
-                                    saveThreadsToCache(context, threads)
-                                }
+                                val tid = fetchThreadIdByAddress(context, selectedAddress!!) ?: "-1"
+                                performBlock(tid, selectedAddress!!)
                                 currentScreen = returnToScreen
-                                refreshTrigger++
                             }
                         },
                         onArchive = {
                             scope.launch {
-                                val tid = fetchThreadIdByAddress(context, selectedAddress!!)
-                                if (tid != null) {
-                                    markThreadArchived(context, tid, true)
-                                    threads = threads.map { 
-                                        if (it.threadId == tid) it.copy(isArchived = true) else it 
-                                    }
-                                    saveThreadsToCache(context, threads)
-                                }
+                                val tid = fetchThreadIdByAddress(context, selectedAddress!!) ?: "-1"
+                                performArchive(tid)
                                 currentScreen = "threads"
                             }
                         },
                         onDelete = {
                             scope.launch {
-                                val tid = fetchThreadIdByAddress(context, selectedAddress!!)
-                                if (tid != null) {
-                                    deleteThread(context, tid)
-                                    threads = threads.filter { it.threadId != tid }
-                                    saveThreadsToCache(context, threads)
-                                }
+                                val tid = fetchThreadIdByAddress(context, selectedAddress!!) ?: "-1"
+                                performDelete(tid)
                                 currentScreen = "threads"
                             }
                         }
@@ -616,6 +533,109 @@ fun MainNavigation() {
             FullScreenImage(uri = uri, onDismiss = { selectedImageUri = null })
         }
     }
+}
+
+@Composable
+fun ThreadActionMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    isSpamView: Boolean,
+    isArchiveView: Boolean,
+    onArchive: () -> Unit,
+    onUnarchive: () -> Unit,
+    onBlock: () -> Unit,
+    onUnblock: () -> Unit,
+    onDelete: () -> Unit
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest) {
+        if (isSpamView) {
+            ThreadActionMenuItem("Not Spam / Unblock", onDismissRequest = onDismissRequest, onClick = onUnblock)
+            ThreadActionMenuItem("Archive", Icons.Default.Delete, onDismissRequest = onDismissRequest, onClick = onArchive)
+        } else {
+            if (isArchiveView) {
+                ThreadActionMenuItem("Unarchive", Icons.AutoMirrored.Filled.ArrowBack, onDismissRequest = onDismissRequest, onClick = onUnarchive)
+            } else {
+                ThreadActionMenuItem("Archive", Icons.Default.Delete, onDismissRequest = onDismissRequest, onClick = onArchive)
+            }
+            ThreadActionMenuItem("Block & Report Spam", Icons.Default.Warning, Color.Red, onDismissRequest = onDismissRequest, onClick = onBlock)
+        }
+        ThreadActionMenuItem("Delete", Icons.Default.Delete, onDismissRequest = onDismissRequest, onClick = onDelete)
+    }
+}
+
+@Composable
+fun ThreadActionMenuItem(
+    text: String,
+    icon: ImageVector? = null,
+    iconTint: Color = Color.Unspecified,
+    onDismissRequest: () -> Unit,
+    onClick: () -> Unit
+) {
+    DropdownMenuItem(
+        text = { Text(text) },
+        onClick = {
+            onDismissRequest()
+            onClick()
+        },
+        leadingIcon = icon?.let {
+            { Icon(it, contentDescription = null, tint = iconTint) }
+        }
+    )
+}
+
+@Composable
+fun ConfirmationDialog(
+    title: String,
+    text: String,
+    confirmText: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(text) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(confirmText, color = Color.Red)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun DeleteThreadConfirmationDialog(
+    contactName: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ConfirmationDialog(
+        title = "Delete Conversation?",
+        text = "Are you sure you want to delete the conversation with $contactName?",
+        confirmText = "Delete",
+        onConfirm = onConfirm,
+        onDismiss = onDismiss
+    )
+}
+
+@Composable
+fun BlockThreadConfirmationDialog(
+    contactName: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ConfirmationDialog(
+        title = "Block & Report Spam?",
+        text = "This will block $contactName and move the conversation to Spam.",
+        confirmText = "Block",
+        onConfirm = onConfirm,
+        onDismiss = onDismiss
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -799,44 +819,24 @@ fun ConversationListScreen(
     }
 
     if (threadToDelete != null) {
-        AlertDialog(
-            onDismissRequest = { threadToDelete = null },
-            title = { Text("Delete Conversation?") },
-            text = { Text("Are you sure you want to delete the conversation with ${threadToDelete?.contactName ?: threadToDelete?.address}?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onDeleteThread(threadToDelete!!.threadId)
-                    threadToDelete = null
-                }) {
-                    Text("Delete", color = Color.Red)
-                }
+        DeleteThreadConfirmationDialog(
+            contactName = threadToDelete?.contactName ?: threadToDelete?.address ?: "Unknown",
+            onConfirm = {
+                onDeleteThread(threadToDelete!!.threadId)
+                threadToDelete = null
             },
-            dismissButton = {
-                TextButton(onClick = { threadToDelete = null }) {
-                    Text("Cancel")
-                }
-            }
+            onDismiss = { threadToDelete = null }
         )
     }
 
     if (threadToBlock != null) {
-        AlertDialog(
-            onDismissRequest = { threadToBlock = null },
-            title = { Text("Block & Report Spam?") },
-            text = { Text("This will block ${threadToBlock?.contactName ?: threadToBlock?.address} and move the conversation to Spam.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onBlockThread(threadToBlock!!)
-                    threadToBlock = null
-                }) {
-                    Text("Block", color = Color.Red)
-                }
+        BlockThreadConfirmationDialog(
+            contactName = threadToBlock?.contactName ?: threadToBlock?.address ?: "Unknown",
+            onConfirm = {
+                onBlockThread(threadToBlock!!)
+                threadToBlock = null
             },
-            dismissButton = {
-                TextButton(onClick = { threadToBlock = null }) {
-                    Text("Cancel")
-                }
-            }
+            onDismiss = { threadToBlock = null }
         )
     }
 }
@@ -894,70 +894,17 @@ fun ThreadItem(
                     tint = MaterialTheme.colorScheme.outline
                 )
             }
-            DropdownMenu(
+            ThreadActionMenu(
                 expanded = showMenu,
-                onDismissRequest = { showMenu = false }
-            ) {
-                if (isSpamView) {
-                    DropdownMenuItem(
-                        text = { Text("Not Spam / Unblock") },
-                        onClick = {
-                            showMenu = false
-                            onUnblock()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Archive") },
-                        onClick = {
-                            showMenu = false
-                            onArchive()
-                        },
-                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
-                    )
-                } else if (isArchiveView) {
-                    DropdownMenuItem(
-                        text = { Text("Unarchive") },
-                        onClick = {
-                            showMenu = false
-                            onUnarchive()
-                        },
-                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Block & Report Spam") },
-                        onClick = {
-                            showMenu = false
-                            onBlock()
-                        },
-                        leadingIcon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) }
-                    )
-                } else {
-                    DropdownMenuItem(
-                        text = { Text("Archive") },
-                        onClick = {
-                            showMenu = false
-                            onArchive()
-                        },
-                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Block & Report Spam") },
-                        onClick = {
-                            showMenu = false
-                            onBlock()
-                        },
-                        leadingIcon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) }
-                    )
-                }
-                DropdownMenuItem(
-                    text = { Text("Delete") },
-                    onClick = {
-                        showMenu = false
-                        onDelete()
-                    },
-                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
-                )
-            }
+                onDismissRequest = { showMenu = false },
+                isSpamView = isSpamView,
+                isArchiveView = isArchiveView,
+                onArchive = onArchive,
+                onUnarchive = onUnarchive,
+                onBlock = onBlock,
+                onUnblock = onUnblock,
+                onDelete = onDelete
+            )
         }
     }
 }
@@ -1177,109 +1124,39 @@ fun ChatScreen(
                 IconButton(onClick = { showMenu = true }) {
                     Icon(Icons.Default.MoreVert, contentDescription = "More options")
                 }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    if (isSpamView) {
-                        DropdownMenuItem(
-                            text = { Text("Not Spam / Unblock") },
-                            onClick = {
-                                showMenu = false
-                                onUnblock()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Archive") },
-                            onClick = {
-                                showMenu = false
-                                onArchive()
-                            },
-                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
-                        )
-                    } else if (isArchiveView) {
-                        DropdownMenuItem(
-                            text = { Text("Unarchive") },
-                            onClick = {
-                                showMenu = false
-                                onUnarchive()
-                            },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Block & Report Spam") },
-                            onClick = {
-                                showMenu = false
-                                showBlockDialog = true
-                            },
-                            leadingIcon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) }
-                        )
-                    } else {
-                        DropdownMenuItem(
-                            text = { Text("Archive") },
-                            onClick = {
-                                showMenu = false
-                                onArchive()
-                            },
-                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Block & Report Spam") },
-                            onClick = {
-                                showMenu = false
-                                showBlockDialog = true
-                            },
-                            leadingIcon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) }
-                        )
-                    }
-                    DropdownMenuItem(
-                        text = { Text("Delete") },
-                        onClick = {
-                            showMenu = false
-                            showDeleteDialog = true
-                        },
-                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
-                    )
-                }
+                ThreadActionMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    isSpamView = isSpamView,
+                    isArchiveView = isArchiveView,
+                    onArchive = onArchive,
+                    onUnarchive = onUnarchive,
+                    onBlock = { showBlockDialog = true },
+                    onUnblock = onUnblock,
+                    onDelete = { showDeleteDialog = true }
+                )
             }
         )
 
         if (showBlockDialog) {
-            AlertDialog(
-                onDismissRequest = { showBlockDialog = false },
-                title = { Text("Block & Report Spam?") },
-                text = { Text("This will block $contactName and move the conversation to Spam.") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showBlockDialog = false
-                        onBlock()
-                    }) {
-                        Text("Block", color = Color.Red)
-                    }
+            BlockThreadConfirmationDialog(
+                contactName = contactName,
+                onConfirm = {
+                    showBlockDialog = false
+                    onBlock()
                 },
-                dismissButton = {
-                    TextButton(onClick = { showBlockDialog = false }) {
-                        Text("Cancel")
-                    }
-                }
+                onDismiss = { showBlockDialog = false }
             )
         }
 
         if (showDeleteDialog) {
-            AlertDialog(
-                onDismissRequest = { showDeleteDialog = false },
-                title = { Text("Delete Conversation?") },
-                text = { Text("Are you sure you want to delete the conversation with $contactName?") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showDeleteDialog = false
-                        onDelete()
-                    }) {
-                        Text("Delete", color = Color.Red)
-                    }
+            DeleteThreadConfirmationDialog(
+                contactName = contactName,
+                onConfirm = {
+                    showDeleteDialog = false
+                    onDelete()
                 },
-                dismissButton = {
-                    TextButton(onClick = { showDeleteDialog = false }) {
-                        Text("Cancel")
-                    }
-                }
+                onDismiss = { showDeleteDialog = false }
             )
         }
 
