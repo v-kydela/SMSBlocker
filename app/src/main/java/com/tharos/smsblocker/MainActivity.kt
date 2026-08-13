@@ -1071,8 +1071,8 @@ fun ChatByAddressScreen(
     onDelete: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    var threadId by rememberSaveable { mutableStateOf<String?>(null) }
-    var contactName by rememberSaveable { mutableStateOf(address) }
+    var threadId by rememberSaveable(address) { mutableStateOf<String?>(null) }
+    var contactName by rememberSaveable(address) { mutableStateOf(address) }
 
     LaunchedEffect(address) {
         threadId = fetchThreadIdByAddress(context, address)
@@ -1111,17 +1111,20 @@ fun ChatScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var messages by rememberSaveable { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var messages by rememberSaveable(threadId) { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var textValue by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
-    var currentThreadId by rememberSaveable { mutableStateOf(threadId) }
+    var currentThreadId by rememberSaveable(threadId) { mutableStateOf(threadId) }
+    var isLoading by remember { mutableStateOf(threadId != "-1") }
     var showBlockDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(currentThreadId, refreshTrigger) {
         if (currentThreadId != "-1") {
+            isLoading = true
             messages = fetchMessagesForThread(context, currentThreadId)
         }
+        isLoading = false
     }
 
     LaunchedEffect(currentThreadId) {
@@ -1179,13 +1182,21 @@ fun ChatScreen(
             )
         }
 
-        LazyColumn(
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            state = listState,
-            reverseLayout = true
-        ) {
-            items(messages.asReversed()) { message ->
-                MessageBubble(message, onImageClick = onImageClick)
+        Box(modifier = Modifier.weight(1f)) {
+            if (isLoading && messages.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            }
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                state = listState,
+                reverseLayout = true
+            ) {
+                items(messages.asReversed()) { message ->
+                    MessageBubble(message, onImageClick = onImageClick)
+                }
             }
         }
 
