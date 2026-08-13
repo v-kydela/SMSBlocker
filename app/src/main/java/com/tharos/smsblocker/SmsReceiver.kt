@@ -67,8 +67,14 @@ class SmsReceiver : BroadcastReceiver() {
     private fun showNotification(context: Context, sender: String, body: String) {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            putExtra("address", sender)
         }
-        val pendingIntent: PendingIntent = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val pendingIntent: PendingIntent = PendingIntent.getActivity(
+            context, 
+            sender.hashCode(), 
+            intent, 
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
 
         val builder = NotificationCompat.Builder(context, "sms_channel")
             .setSmallIcon(android.R.drawable.stat_notify_chat)

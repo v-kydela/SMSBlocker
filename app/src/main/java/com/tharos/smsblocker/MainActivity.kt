@@ -153,15 +153,26 @@ data class ChatMessage(
 data class MmsData(val text: String, val imageUri: Uri?) : Parcelable
 
 class MainActivity : ComponentActivity() {
+    private val initialAddress = mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         createNotificationChannel(this)
+        
+        initialAddress.value = intent.getStringExtra("address")
+
         setContent {
             SMSBlockerTheme {
-                MainNavigation()
+                MainNavigation(initialAddress = initialAddress.value)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        initialAddress.value = intent.getStringExtra("address")
     }
 }
 
@@ -180,13 +191,21 @@ fun createNotificationChannel(context: Context) {
 }
 
 @Composable
-fun MainNavigation() {
+fun MainNavigation(initialAddress: String? = null) {
     var currentScreen by rememberSaveable { mutableStateOf("threads") }
     var returnToScreen by rememberSaveable { mutableStateOf("threads") }
     var selectedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedContactName by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAddress by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+
+    LaunchedEffect(initialAddress) {
+        if (initialAddress != null) {
+            selectedAddress = initialAddress
+            selectedThreadId = null // Force reload by address
+            currentScreen = "chat_by_address"
+        }
+    }
     
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
