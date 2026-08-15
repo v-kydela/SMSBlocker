@@ -1111,18 +1111,33 @@ fun ChatScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var messages by rememberSaveable(threadId) { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var currentThreadId by rememberSaveable(threadId) { mutableStateOf(threadId) }
+    var messages by rememberSaveable(currentThreadId) { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var textValue by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
-    var currentThreadId by rememberSaveable(threadId) { mutableStateOf(threadId) }
-    var isLoading by remember { mutableStateOf(threadId != "-1") }
+    var isLoading by remember(currentThreadId) { mutableStateOf(currentThreadId != "-1") }
     var showBlockDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
 
-    LaunchedEffect(currentThreadId, refreshTrigger) {
-        if (currentThreadId != "-1") {
-            isLoading = true
-            messages = fetchMessagesForThread(context, currentThreadId)
+    LaunchedEffect(currentThreadId, address, refreshTrigger) {
+        isLoading = true
+        var targetThreadId = currentThreadId
+        
+        if (targetThreadId == "-1" && address.isNotBlank()) {
+            // Try resolving the thread ID one more time if it was passed as -1
+            val resolvedId = fetchThreadIdByAddress(context, address)
+            if (resolvedId != null) {
+                targetThreadId = resolvedId
+                currentThreadId = resolvedId
+            }
+        }
+
+        if (targetThreadId != "-1") {
+            Log.d("SMSBlocker", "Fetching messages for thread: $targetThreadId")
+            messages = fetchMessagesForThread(context, targetThreadId)
+        } else {
+            Log.d("SMSBlocker", "No thread ID for address: $address, showing empty chat")
+            messages = emptyList()
         }
         isLoading = false
     }
@@ -2054,20 +2069,40 @@ private suspend fun deleteThread(context: Context, threadId: String) = withConte
 }
 
 private suspend fun fetchThreadIdByAddress(context: Context, address: String): String? = withContext(Dispatchers.IO) {
+    if (address.isBlank()) return@withContext null
+    
+    val contentResolver = context.contentResolver
+
+    // 1. Search in SMS table - most reliable for finding threads with actual messages
     try {
-        val uri = "content://mms-sms/threadID".toUri()
-        val projection = arrayOf("_id")
-        val selection = "address = ?"
-        val selectionArgs = arrayOf(address)
+        val uri = Telephony.Sms.CONTENT_URI
+        val projection = arrayOf(Telephony.Sms.THREAD_ID)
+        val selection = "${Telephony.Sms.ADDRESS} = ?"
         
-        context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                return@withContext cursor.getString(0)
+        // Try exact match
+        contentResolver.query(uri, projection, selection, arrayOf(address), "date DESC LIMIT 1")?.use { cursor ->
+            if (cursor.moveToFirst()) return@withContext cursor.getString(0)
+        }
+        
+        // Try normalized match
+        val normalized = address.replace(Regex("[^0-9+]"), "")
+        if (normalized != address) {
+            contentResolver.query(uri, projection, selection, arrayOf(normalized), "date DESC LIMIT 1")?.use { cursor ->
+                if (cursor.moveToFirst()) return@withContext cursor.getString(0)
             }
         }
     } catch (e: Exception) {
-        Log.e("SMSBlocker", "Error getting thread ID by address", e)
+        Log.d("SMSBlocker", "SMS table lookup failed: ${e.message}")
     }
+
+    // 2. Use Telephony.Threads helper as a fallback
+    try {
+        val threadId = Telephony.Threads.getOrCreateThreadId(context, address)
+        return@withContext threadId.toString()
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Telephony.Threads lookup failed for $address", e)
+    }
+
     null
 }
 
