@@ -16,6 +16,7 @@ import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.util.Log
+import android.util.Patterns
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -43,6 +44,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -98,7 +100,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -1277,33 +1284,63 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                 shape = bubbleShape,
                 shadowElevation = 1.dp
             ) {
-                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                    if (message.imageUri != null) {
-                        AsyncImage(
-                            model = message.imageUri,
-                            contentDescription = null,
-                            modifier = Modifier
-                                .padding(bottom = 4.dp)
-                                .sizeIn(maxWidth = 240.dp, maxHeight = 320.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onImageClick(message.imageUri) },
-                            contentScale = ContentScale.Fit
-                        )
-                    }
-                    if (message.body.isNotBlank()) {
+                SelectionContainer {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        if (message.imageUri != null) {
+                            AsyncImage(
+                                model = message.imageUri,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .padding(bottom = 4.dp)
+                                    .sizeIn(maxWidth = 240.dp, maxHeight = 320.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onImageClick(message.imageUri) },
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                        if (message.body.isNotBlank()) {
+                            val annotatedString = buildAnnotatedString {
+                                val text = message.body
+                                val matcher = Patterns.WEB_URL.matcher(text)
+                                var lastIndex = 0
+                                while (matcher.find()) {
+                                    append(text.substring(lastIndex, matcher.start()))
+                                    val url = matcher.group()
+                                    val start = this.length
+                                    append(url)
+                                    addLink(
+                                        url = LinkAnnotation.Url(
+                                            url = url,
+                                            styles = TextLinkStyles(
+                                                style = SpanStyle(
+                                                    color = if (message.isMe) Color.White else MaterialTheme.colorScheme.primary,
+                                                    textDecoration = TextDecoration.Underline
+                                                )
+                                            )
+                                        ),
+                                        start = start,
+                                        end = this.length
+                                    )
+                                    lastIndex = matcher.end()
+                                }
+                                append(text.substring(lastIndex))
+                            }
+                            Text(
+                                text = annotatedString,
+                                color = textColor,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
                         Text(
-                            text = message.body,
-                            color = textColor,
-                            style = MaterialTheme.typography.bodyLarge
+                            text = timeFormat.format(Date(message.date)),
+                            color = textColor.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .align(Alignment.End)
+                                .padding(top = 2.dp),
+                            fontSize = 10.sp
                         )
                     }
-                    Text(
-                        text = timeFormat.format(Date(message.date)),
-                        color = textColor.copy(alpha = 0.7f),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
-                        fontSize = 10.sp
-                    )
                 }
             }
             
