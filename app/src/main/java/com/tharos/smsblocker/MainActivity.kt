@@ -24,7 +24,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,6 +52,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
@@ -205,6 +209,7 @@ fun MainNavigation(initialAddress: String? = null) {
     var selectedContactName by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAddress by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var selectedThreadIds by rememberSaveable { mutableStateOf(setOf<String>()) }
 
     LaunchedEffect(initialAddress) {
         if (initialAddress != null) {
@@ -345,65 +350,79 @@ fun MainNavigation(initialAddress: String? = null) {
         }
     }
 
-    val performDelete: (String) -> Unit = { threadId ->
-        val updatedDeletions = pendingDeletions + threadId
+    val performDelete: (List<String>) -> Unit = { threadIds ->
+        val updatedDeletions = pendingDeletions + threadIds
         pendingDeletions = updatedDeletions
         deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
         scope.launch {
-            deleteThread(context, threadId)
-            threads = threads.filter { it.threadId != threadId }
+            threadIds.forEach { deleteThread(context, it) }
+            threads = threads.filter { it.threadId !in threadIds }
             saveThreadsToCache(context, threads)
         }
     }
 
-    val performBlock: (String, String) -> Unit = { threadId, address ->
+    val performBlock: (List<MessageThread>) -> Unit = { selectedThreads ->
         scope.launch {
-            blockNumber(context, address)
-            markThreadAsSpam(context, threadId, true)
+            selectedThreads.forEach { thread ->
+                blockNumber(context, thread.address)
+                markThreadAsSpam(context, thread.threadId, true)
+            }
+            val ids = selectedThreads.map { it.threadId }.toSet()
             threads = threads.map {
-                if (it.threadId == threadId) it.copy(isSpam = true, isArchived = false) else it
+                if (it.threadId in ids) it.copy(isSpam = true, isArchived = false) else it
             }
             saveThreadsToCache(context, threads)
             refreshTrigger++
         }
     }
 
-    val performUnblock: (String, String) -> Unit = { threadId, address ->
+    val performUnblock: (List<MessageThread>) -> Unit = { selectedThreads ->
         scope.launch {
-            unblockNumber(context, address)
-            markThreadAsSpam(context, threadId, false)
+            selectedThreads.forEach { thread ->
+                unblockNumber(context, thread.address)
+                markThreadAsSpam(context, thread.threadId, false)
+            }
+            val ids = selectedThreads.map { it.threadId }.toSet()
             threads = threads.map {
-                if (it.threadId == threadId) it.copy(isSpam = false) else it
+                if (it.threadId in ids) it.copy(isSpam = false) else it
             }
             saveThreadsToCache(context, threads)
             refreshTrigger++
         }
     }
 
-    val performArchive: (String) -> Unit = { threadId ->
+    val performArchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
-            markThreadAsSpam(context, threadId, false)
-            markThreadArchived(context, threadId, true)
+            threadIds.forEach { threadId ->
+                markThreadAsSpam(context, threadId, false)
+                markThreadArchived(context, threadId, true)
+            }
+            val ids = threadIds.toSet()
             threads = threads.map {
-                if (it.threadId == threadId) it.copy(isArchived = true, isSpam = false) else it
+                if (it.threadId in ids) it.copy(isArchived = true, isSpam = false) else it
             }
             saveThreadsToCache(context, threads)
         }
     }
 
-    val performUnarchive: (String) -> Unit = { threadId ->
+    val performUnarchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
-            markThreadArchived(context, threadId, false)
+            threadIds.forEach { threadId ->
+                markThreadArchived(context, threadId, false)
+            }
+            val ids = threadIds.toSet()
             threads = threads.map {
-                if (it.threadId == threadId) it.copy(isArchived = false) else it
+                if (it.threadId in ids) it.copy(isArchived = false) else it
             }
             saveThreadsToCache(context, threads)
         }
     }
 
-    BackHandler(enabled = currentScreen != "threads" || selectedImageUri != null) {
+    BackHandler(enabled = currentScreen != "threads" || selectedImageUri != null || selectedThreadIds.isNotEmpty()) {
         if (selectedImageUri != null) {
             selectedImageUri = null
+        } else if (selectedThreadIds.isNotEmpty()) {
+            selectedThreadIds = emptySet()
         } else if (currentScreen == "chat" || currentScreen == "chat_by_address") {
             currentScreen = returnToScreen
         } else {
@@ -419,6 +438,8 @@ fun MainNavigation(initialAddress: String? = null) {
                         threads = threads.filter { !it.isSpam && !it.isArchived },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
+                        selectedThreadIds = selectedThreadIds,
+                        onSelectionChange = { selectedThreadIds = it },
                         onSettingsClick = { currentScreen = "settings" },
                         onSpamClick = { currentScreen = "spam" },
                         onArchiveClick = { currentScreen = "archived" },
@@ -440,15 +461,17 @@ fun MainNavigation(initialAddress: String? = null) {
                             }
                         },
                         onNewChat = { currentScreen = "new_chat" },
-                        onDeleteThread = performDelete,
-                        onBlockThread = { thread -> performBlock(thread.threadId, thread.address) },
-                        onArchiveThread = { thread -> performArchive(thread.threadId) }
+                        onDeleteThreads = performDelete,
+                        onBlockThreads = performBlock,
+                        onArchiveThreads = performArchive
                     )
                     "spam" -> ConversationListScreen(
                         threads = threads.filter { it.isSpam },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
                         isSpamView = true,
+                        selectedThreadIds = selectedThreadIds,
+                        onSelectionChange = { selectedThreadIds = it },
                         onSettingsClick = { currentScreen = "settings" },
                         onBack = { currentScreen = "threads" },
                         onThreadClick = { thread -> 
@@ -459,15 +482,17 @@ fun MainNavigation(initialAddress: String? = null) {
                             currentScreen = "chat"
                         },
                         onNewChat = { currentScreen = "new_chat" },
-                        onDeleteThread = performDelete,
-                        onUnblockThread = { thread -> performUnblock(thread.threadId, thread.address) },
-                        onArchiveThread = { thread -> performArchive(thread.threadId) }
+                        onDeleteThreads = performDelete,
+                        onUnblockThreads = performUnblock,
+                        onArchiveThreads = performArchive
                     )
                     "archived" -> ConversationListScreen(
                         threads = threads.filter { it.isArchived && !it.isSpam },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
                         isArchiveView = true,
+                        selectedThreadIds = selectedThreadIds,
+                        onSelectionChange = { selectedThreadIds = it },
                         onSettingsClick = { currentScreen = "settings" },
                         onBack = { currentScreen = "threads" },
                         onThreadClick = { thread -> 
@@ -478,9 +503,9 @@ fun MainNavigation(initialAddress: String? = null) {
                             currentScreen = "chat"
                         },
                         onNewChat = { currentScreen = "new_chat" },
-                        onDeleteThread = performDelete,
-                        onUnarchiveThread = { thread -> performUnarchive(thread.threadId) },
-                        onBlockThread = { thread -> performBlock(thread.threadId, thread.address) }
+                        onDeleteThreads = performDelete,
+                        onUnarchiveThreads = performUnarchive,
+                        onBlockThreads = performBlock
                     )
                     "chat" -> ChatScreen(
                         threadId = selectedThreadId!!,
@@ -492,23 +517,23 @@ fun MainNavigation(initialAddress: String? = null) {
                         isSpamView = returnToScreen == "spam",
                         isArchiveView = returnToScreen == "archived",
                         onDelete = {
-                            performDelete(selectedThreadId!!)
+                            performDelete(listOf(selectedThreadId!!))
                             currentScreen = returnToScreen
                         },
                         onBlock = {
-                            performBlock(selectedThreadId!!, selectedAddress!!)
+                            performBlock(listOf(MessageThread(selectedThreadId!!, selectedAddress!!, null, "", 0, true)))
                             currentScreen = returnToScreen
                         },
                         onUnblock = {
-                            performUnblock(selectedThreadId!!, selectedAddress!!)
+                            performUnblock(listOf(MessageThread(selectedThreadId!!, selectedAddress!!, null, "", 0, true)))
                             currentScreen = returnToScreen
                         },
                         onArchive = {
-                            performArchive(selectedThreadId!!)
+                            performArchive(listOf(selectedThreadId!!))
                             currentScreen = returnToScreen
                         },
                         onUnarchive = {
-                            performUnarchive(selectedThreadId!!)
+                            performUnarchive(listOf(selectedThreadId!!))
                             currentScreen = returnToScreen
                         }
                     )
@@ -529,21 +554,21 @@ fun MainNavigation(initialAddress: String? = null) {
                         onBlock = {
                             scope.launch {
                                 val tid = fetchThreadIdByAddress(context, selectedAddress!!) ?: "-1"
-                                performBlock(tid, selectedAddress!!)
+                                performBlock(listOf(MessageThread(tid, selectedAddress!!, null, "", 0, true)))
                                 currentScreen = returnToScreen
                             }
                         },
                         onArchive = {
                             scope.launch {
                                 val tid = fetchThreadIdByAddress(context, selectedAddress!!) ?: "-1"
-                                performArchive(tid)
+                                performArchive(listOf(tid))
                                 currentScreen = "threads"
                             }
                         },
                         onDelete = {
                             scope.launch {
                                 val tid = fetchThreadIdByAddress(context, selectedAddress!!) ?: "-1"
-                                performDelete(tid)
+                                performDelete(listOf(tid))
                                 currentScreen = "threads"
                             }
                         }
@@ -664,7 +689,7 @@ fun BlockThreadConfirmationDialog(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ConversationListScreen(
     threads: List<MessageThread>,
@@ -672,20 +697,22 @@ fun ConversationListScreen(
     hasPermissions: Boolean,
     isSpamView: Boolean = false,
     isArchiveView: Boolean = false,
+    selectedThreadIds: Set<String> = emptySet(),
+    onSelectionChange: (Set<String>) -> Unit = {},
     onSettingsClick: () -> Unit,
     onSpamClick: () -> Unit = {},
     onArchiveClick: () -> Unit = {},
     onBack: () -> Unit = {},
     onThreadClick: (MessageThread) -> Unit,
     onNewChat: () -> Unit,
-    onDeleteThread: (String) -> Unit,
-    onBlockThread: (MessageThread) -> Unit = {},
-    onUnblockThread: (MessageThread) -> Unit = {},
-    onArchiveThread: (MessageThread) -> Unit = {},
-    onUnarchiveThread: (MessageThread) -> Unit = {}
+    onDeleteThreads: (List<String>) -> Unit,
+    onBlockThreads: (List<MessageThread>) -> Unit = {},
+    onUnblockThreads: (List<MessageThread>) -> Unit = {},
+    onArchiveThreads: (List<String>) -> Unit = {},
+    onUnarchiveThreads: (List<String>) -> Unit = {}
 ) {
-    var threadToDelete by rememberSaveable { mutableStateOf<MessageThread?>(null) }
-    var threadToBlock by rememberSaveable { mutableStateOf<MessageThread?>(null) }
+    var threadsToDelete by rememberSaveable { mutableStateOf<List<String>?>(null) }
+    var threadsToBlock by rememberSaveable { mutableStateOf<List<MessageThread>?>(null) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
 
@@ -703,7 +730,56 @@ fun ConversationListScreen(
 
     Scaffold(
         topBar = {
-            if (isSpamView || isArchiveView) {
+            if (selectedThreadIds.isNotEmpty()) {
+                TopAppBar(
+                    title = { Text("${selectedThreadIds.size}") },
+                    navigationIcon = {
+                        IconButton(onClick = { onSelectionChange(emptySet()) }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                        }
+                    },
+                    actions = {
+                        if (isSpamView) {
+                            IconButton(onClick = {
+                                onUnblockThreads(threads.filter { it.threadId in selectedThreadIds })
+                                onSelectionChange(emptySet())
+                            }) {
+                                Icon(Icons.Default.Check, contentDescription = "Not Spam")
+                            }
+                        } else if (isArchiveView) {
+                            IconButton(onClick = {
+                                onUnarchiveThreads(selectedThreadIds.toList())
+                                onSelectionChange(emptySet())
+                            }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Unarchive")
+                            }
+                        } else {
+                            IconButton(onClick = {
+                                onArchiveThreads(selectedThreadIds.toList())
+                                onSelectionChange(emptySet())
+                            }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Archive")
+                            }
+                        }
+                        
+                        IconButton(onClick = {
+                            threadsToDelete = selectedThreadIds.toList()
+                            onSelectionChange(emptySet())
+                        }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete")
+                        }
+
+                        if (!isSpamView && !isArchiveView) {
+                            IconButton(onClick = {
+                                threadsToBlock = threads.filter { it.threadId in selectedThreadIds }
+                                onSelectionChange(emptySet())
+                            }) {
+                                Icon(Icons.Default.Warning, contentDescription = "Block")
+                            }
+                        }
+                    }
+                )
+            } else if (isSpamView || isArchiveView) {
                 TopAppBar(
                     title = { Text(if (isSpamView) "Spam" else "Archive") },
                     navigationIcon = {
@@ -715,7 +791,7 @@ fun ConversationListScreen(
             }
         },
         floatingActionButton = {
-            if (!isSearchActive && !isSpamView && !isArchiveView) {
+            if (!isSearchActive && !isSpamView && !isArchiveView && selectedThreadIds.isEmpty()) {
                 FloatingActionButton(onClick = onNewChat) {
                     Icon(Icons.Default.Add, contentDescription = "New Message")
                 }
@@ -723,7 +799,7 @@ fun ConversationListScreen(
         }
     ) { p ->
         Column(modifier = Modifier.fillMaxSize().padding(p)) {
-            if (!isSpamView && !isArchiveView) {
+            if (!isSpamView && !isArchiveView && selectedThreadIds.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -777,15 +853,28 @@ fun ConversationListScreen(
                             items(filteredThreads, key = { it.threadId }) { thread ->
                                 ThreadItem(
                                     thread,
+                                    isSelected = selectedThreadIds.contains(thread.threadId),
                                     onClick = {
-                                        isSearchActive = false
-                                        onThreadClick(thread)
+                                        if (selectedThreadIds.isNotEmpty()) {
+                                            val newSelection = if (selectedThreadIds.contains(thread.threadId)) {
+                                                selectedThreadIds - thread.threadId
+                                            } else {
+                                                selectedThreadIds + thread.threadId
+                                            }
+                                            onSelectionChange(newSelection)
+                                        } else {
+                                            isSearchActive = false
+                                            onThreadClick(thread)
+                                        }
                                     },
-                                    onDelete = { threadToDelete = thread },
-                                    onBlock = { threadToBlock = thread },
-                                    onUnblock = { onUnblockThread(thread) },
-                                    onArchive = { onArchiveThread(thread) },
-                                    onUnarchive = { onUnarchiveThread(thread) },
+                                    onLongClick = {
+                                        onSelectionChange(selectedThreadIds + thread.threadId)
+                                    },
+                                    onDelete = { threadsToDelete = listOf(thread.threadId) },
+                                    onBlock = { threadsToBlock = listOf(thread) },
+                                    onUnblock = { onUnblockThreads(listOf(thread)) },
+                                    onArchive = { onArchiveThreads(listOf(thread.threadId)) },
+                                    onUnarchive = { onUnarchiveThreads(listOf(thread.threadId)) },
                                     isSpamView = isSpamView,
                                     isArchiveView = isArchiveView
                                 )
@@ -827,12 +916,27 @@ fun ConversationListScreen(
                         items(filteredThreads, key = { it.threadId }) { thread ->
                             ThreadItem(
                                 thread, 
-                                onClick = { onThreadClick(thread) },
-                                onDelete = { threadToDelete = thread },
-                                onBlock = { threadToBlock = thread },
-                                onUnblock = { onUnblockThread(thread) },
-                                onArchive = { onArchiveThread(thread) },
-                                onUnarchive = { onUnarchiveThread(thread) },
+                                isSelected = selectedThreadIds.contains(thread.threadId),
+                                onClick = {
+                                    if (selectedThreadIds.isNotEmpty()) {
+                                        val newSelection = if (selectedThreadIds.contains(thread.threadId)) {
+                                            selectedThreadIds - thread.threadId
+                                        } else {
+                                            selectedThreadIds + thread.threadId
+                                        }
+                                        onSelectionChange(newSelection)
+                                    } else {
+                                        onThreadClick(thread)
+                                    }
+                                },
+                                onLongClick = {
+                                    onSelectionChange(selectedThreadIds + thread.threadId)
+                                },
+                                onDelete = { threadsToDelete = listOf(thread.threadId) },
+                                onBlock = { threadsToBlock = listOf(thread) },
+                                onUnblock = { onUnblockThreads(listOf(thread)) },
+                                onArchive = { onArchiveThreads(listOf(thread.threadId)) },
+                                onUnarchive = { onUnarchiveThreads(listOf(thread.threadId)) },
                                 isSpamView = isSpamView,
                                 isArchiveView = isArchiveView
                             )
@@ -844,33 +948,42 @@ fun ConversationListScreen(
         }
     }
 
-    if (threadToDelete != null) {
-        DeleteThreadConfirmationDialog(
-            contactName = threadToDelete?.contactName ?: threadToDelete?.address ?: "Unknown",
+    if (threadsToDelete != null) {
+        val count = threadsToDelete!!.size
+        ConfirmationDialog(
+            title = if (count > 1) "Delete $count conversations?" else "Delete conversation?",
+            text = "Are you sure you want to delete the selected conversation${if (count > 1) "s" else ""}?",
+            confirmText = "Delete",
             onConfirm = {
-                onDeleteThread(threadToDelete!!.threadId)
-                threadToDelete = null
+                onDeleteThreads(threadsToDelete!!)
+                threadsToDelete = null
             },
-            onDismiss = { threadToDelete = null }
+            onDismiss = { threadsToDelete = null }
         )
     }
 
-    if (threadToBlock != null) {
-        BlockThreadConfirmationDialog(
-            contactName = threadToBlock?.contactName ?: threadToBlock?.address ?: "Unknown",
+    if (threadsToBlock != null) {
+        val count = threadsToBlock!!.size
+        ConfirmationDialog(
+            title = if (count > 1) "Block $count conversations?" else "Block & Report Spam?",
+            text = if (count > 1) "This will block the selected numbers and move conversations to Spam." else "This will block ${threadsToBlock!![0].contactName ?: threadsToBlock!![0].address} and move the conversation to Spam.",
+            confirmText = "Block",
             onConfirm = {
-                onBlockThread(threadToBlock!!)
-                threadToBlock = null
+                onBlockThreads(threadsToBlock!!)
+                threadsToBlock = null
             },
-            onDismiss = { threadToBlock = null }
+            onDismiss = { threadsToBlock = null }
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ThreadItem(
     thread: MessageThread, 
+    isSelected: Boolean,
     onClick: () -> Unit, 
+    onLongClick: () -> Unit,
     onDelete: () -> Unit,
     onBlock: () -> Unit,
     onUnblock: () -> Unit,
@@ -885,10 +998,36 @@ fun ThreadItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Surface(
+            modifier = Modifier.size(40.dp),
+            shape = RoundedCornerShape(20.dp),
+            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                if (isSelected) {
+                    Icon(
+                        Icons.Default.Check, 
+                        contentDescription = null, 
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    Text(
+                        text = (thread.contactName ?: thread.address).take(1).uppercase(),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
