@@ -746,12 +746,24 @@ fun ConversationListScreen(
                             }) {
                                 Icon(Icons.Default.Check, contentDescription = "Not Spam")
                             }
+                            IconButton(onClick = {
+                                onArchiveThreads(selectedThreadIds.toList())
+                                onSelectionChange(emptySet())
+                            }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Archive")
+                            }
                         } else if (isArchiveView) {
                             IconButton(onClick = {
                                 onUnarchiveThreads(selectedThreadIds.toList())
                                 onSelectionChange(emptySet())
                             }) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Unarchive")
+                            }
+                            IconButton(onClick = {
+                                threadsToBlock = threads.filter { it.threadId in selectedThreadIds }
+                                onSelectionChange(emptySet())
+                            }) {
+                                Icon(Icons.Default.Warning, contentDescription = "Block")
                             }
                         } else {
                             IconButton(onClick = {
@@ -760,6 +772,12 @@ fun ConversationListScreen(
                             }) {
                                 Icon(Icons.Default.Delete, contentDescription = "Archive")
                             }
+                            IconButton(onClick = {
+                                threadsToBlock = threads.filter { it.threadId in selectedThreadIds }
+                                onSelectionChange(emptySet())
+                            }) {
+                                Icon(Icons.Default.Warning, contentDescription = "Block")
+                            }
                         }
                         
                         IconButton(onClick = {
@@ -767,15 +785,6 @@ fun ConversationListScreen(
                             onSelectionChange(emptySet())
                         }) {
                             Icon(Icons.Default.Delete, contentDescription = "Delete")
-                        }
-
-                        if (!isSpamView && !isArchiveView) {
-                            IconButton(onClick = {
-                                threadsToBlock = threads.filter { it.threadId in selectedThreadIds }
-                                onSelectionChange(emptySet())
-                            }) {
-                                Icon(Icons.Default.Warning, contentDescription = "Block")
-                            }
                         }
                     }
                 )
