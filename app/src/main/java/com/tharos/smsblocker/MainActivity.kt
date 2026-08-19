@@ -163,6 +163,41 @@ data class ChatMessage(
 @Parcelize
 data class MmsData(val text: String, val imageUri: Uri?) : Parcelable
 
+enum class ActionType {
+    DELETE, ARCHIVE, UNARCHIVE, BLOCK, UNBLOCK
+}
+
+enum class ConversationView {
+    MAIN, SPAM, ARCHIVE
+}
+
+data class ConversationAction(
+    val type: ActionType,
+    val label: String,
+    val icon: ImageVector,
+    val iconTint: Color = Color.Unspecified
+)
+
+private val ALL_ACTIONS by lazy {
+    mapOf(
+        ActionType.DELETE to ConversationAction(ActionType.DELETE, "Delete", Icons.Default.Delete),
+        ActionType.ARCHIVE to ConversationAction(ActionType.ARCHIVE, "Archive", Icons.Default.Delete),
+        ActionType.UNARCHIVE to ConversationAction(ActionType.UNARCHIVE, "Unarchive", Icons.AutoMirrored.Filled.ArrowBack),
+        ActionType.BLOCK to ConversationAction(ActionType.BLOCK, "Block & Report Spam", Icons.Default.Warning, Color.Red),
+        ActionType.UNBLOCK to ConversationAction(ActionType.UNBLOCK, "Not Spam / Unblock", Icons.Default.Check)
+    )
+}
+
+private val VIEW_ACTIONS = mapOf(
+    ConversationView.SPAM to listOf(ActionType.UNBLOCK, ActionType.ARCHIVE, ActionType.DELETE),
+    ConversationView.ARCHIVE to listOf(ActionType.UNARCHIVE, ActionType.BLOCK, ActionType.DELETE),
+    ConversationView.MAIN to listOf(ActionType.ARCHIVE, ActionType.BLOCK, ActionType.DELETE)
+)
+
+fun getConversationActions(view: ConversationView): List<ConversationAction> {
+    return VIEW_ACTIONS[view]?.map { ALL_ACTIONS[it]!! } ?: emptyList()
+}
+
 class MainActivity : ComponentActivity() {
     private val initialAddress = mutableStateOf<String?>(null)
 
@@ -438,6 +473,7 @@ fun MainNavigation(initialAddress: String? = null) {
                         threads = threads.filter { !it.isSpam && !it.isArchived },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
+                        view = ConversationView.MAIN,
                         selectedThreadIds = selectedThreadIds,
                         onSelectionChange = { selectedThreadIds = it },
                         onSettingsClick = { currentScreen = "settings" },
@@ -469,7 +505,7 @@ fun MainNavigation(initialAddress: String? = null) {
                         threads = threads.filter { it.isSpam },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
-                        isSpamView = true,
+                        view = ConversationView.SPAM,
                         selectedThreadIds = selectedThreadIds,
                         onSelectionChange = { selectedThreadIds = it },
                         onSettingsClick = { currentScreen = "settings" },
@@ -490,7 +526,7 @@ fun MainNavigation(initialAddress: String? = null) {
                         threads = threads.filter { it.isArchived && !it.isSpam },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
-                        isArchiveView = true,
+                        view = ConversationView.ARCHIVE,
                         selectedThreadIds = selectedThreadIds,
                         onSelectionChange = { selectedThreadIds = it },
                         onSettingsClick = { currentScreen = "settings" },
@@ -514,8 +550,11 @@ fun MainNavigation(initialAddress: String? = null) {
                         refreshTrigger = refreshTrigger,
                         onBack = { currentScreen = returnToScreen },
                         onImageClick = { selectedImageUri = it },
-                        isSpamView = returnToScreen == "spam",
-                        isArchiveView = returnToScreen == "archived",
+                        view = when(returnToScreen) {
+                            "spam" -> ConversationView.SPAM
+                            "archived" -> ConversationView.ARCHIVE
+                            else -> ConversationView.MAIN
+                        },
                         onDelete = {
                             performDelete(listOf(selectedThreadId!!))
                             currentScreen = returnToScreen
@@ -590,27 +629,19 @@ fun MainNavigation(initialAddress: String? = null) {
 fun ThreadActionMenu(
     expanded: Boolean,
     onDismissRequest: () -> Unit,
-    isSpamView: Boolean,
-    isArchiveView: Boolean,
-    onArchive: () -> Unit,
-    onUnarchive: () -> Unit,
-    onBlock: () -> Unit,
-    onUnblock: () -> Unit,
-    onDelete: () -> Unit
+    actions: List<ConversationAction>,
+    onAction: (ActionType) -> Unit
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest) {
-        if (isSpamView) {
-            ThreadActionMenuItem("Not Spam / Unblock", onDismissRequest = onDismissRequest, onClick = onUnblock)
-            ThreadActionMenuItem("Archive", Icons.Default.Delete, onDismissRequest = onDismissRequest, onClick = onArchive)
-        } else {
-            if (isArchiveView) {
-                ThreadActionMenuItem("Unarchive", Icons.AutoMirrored.Filled.ArrowBack, onDismissRequest = onDismissRequest, onClick = onUnarchive)
-            } else {
-                ThreadActionMenuItem("Archive", Icons.Default.Delete, onDismissRequest = onDismissRequest, onClick = onArchive)
-            }
-            ThreadActionMenuItem("Block & Report Spam", Icons.Default.Warning, Color.Red, onDismissRequest = onDismissRequest, onClick = onBlock)
+        actions.forEach { action ->
+            ThreadActionMenuItem(
+                text = action.label,
+                icon = action.icon,
+                iconTint = action.iconTint,
+                onDismissRequest = onDismissRequest,
+                onClick = { onAction(action.type) }
+            )
         }
-        ThreadActionMenuItem("Delete", Icons.Default.Delete, onDismissRequest = onDismissRequest, onClick = onDelete)
     }
 }
 
@@ -695,8 +726,7 @@ fun ConversationListScreen(
     threads: List<MessageThread>,
     isLoading: Boolean,
     hasPermissions: Boolean,
-    isSpamView: Boolean = false,
-    isArchiveView: Boolean = false,
+    view: ConversationView,
     selectedThreadIds: Set<String> = emptySet(),
     onSelectionChange: (Set<String>) -> Unit = {},
     onSettingsClick: () -> Unit,
@@ -715,6 +745,33 @@ fun ConversationListScreen(
     var threadsToBlock by rememberSaveable { mutableStateOf<List<MessageThread>?>(null) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
+
+    val actions = remember(view) {
+        getConversationActions(view)
+    }
+
+    val handleBulkAction: (ActionType) -> Unit = { type ->
+        val threadIds = selectedThreadIds.toList()
+        when (type) {
+            ActionType.DELETE -> threadsToDelete = threadIds
+            ActionType.ARCHIVE -> onArchiveThreads(threadIds)
+            ActionType.UNARCHIVE -> onUnarchiveThreads(threadIds)
+            ActionType.BLOCK -> threadsToBlock = threads.filter { it.threadId in threadIds }
+            ActionType.UNBLOCK -> onUnblockThreads(threads.filter { it.threadId in threadIds })
+        }
+        onSelectionChange(emptySet())
+    }
+
+    val handleItemAction: (ActionType, MessageThread) -> Unit = { type, thread ->
+        val threadIds = listOf(thread.threadId)
+        when (type) {
+            ActionType.DELETE -> threadsToDelete = threadIds
+            ActionType.ARCHIVE -> onArchiveThreads(threadIds)
+            ActionType.UNARCHIVE -> onUnarchiveThreads(threadIds)
+            ActionType.BLOCK -> threadsToBlock = listOf(thread)
+            ActionType.UNBLOCK -> onUnblockThreads(listOf(thread))
+        }
+    }
 
     val filteredThreads = remember(threads, searchQuery) {
         if (searchQuery.isBlank()) {
@@ -739,58 +796,16 @@ fun ConversationListScreen(
                         }
                     },
                     actions = {
-                        if (isSpamView) {
-                            IconButton(onClick = {
-                                onUnblockThreads(threads.filter { it.threadId in selectedThreadIds })
-                                onSelectionChange(emptySet())
-                            }) {
-                                Icon(Icons.Default.Check, contentDescription = "Not Spam")
+                        actions.forEach { action ->
+                            IconButton(onClick = { handleBulkAction(action.type) }) {
+                                Icon(action.icon, contentDescription = action.label)
                             }
-                            IconButton(onClick = {
-                                onArchiveThreads(selectedThreadIds.toList())
-                                onSelectionChange(emptySet())
-                            }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Archive")
-                            }
-                        } else if (isArchiveView) {
-                            IconButton(onClick = {
-                                onUnarchiveThreads(selectedThreadIds.toList())
-                                onSelectionChange(emptySet())
-                            }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Unarchive")
-                            }
-                            IconButton(onClick = {
-                                threadsToBlock = threads.filter { it.threadId in selectedThreadIds }
-                                onSelectionChange(emptySet())
-                            }) {
-                                Icon(Icons.Default.Warning, contentDescription = "Block")
-                            }
-                        } else {
-                            IconButton(onClick = {
-                                onArchiveThreads(selectedThreadIds.toList())
-                                onSelectionChange(emptySet())
-                            }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Archive")
-                            }
-                            IconButton(onClick = {
-                                threadsToBlock = threads.filter { it.threadId in selectedThreadIds }
-                                onSelectionChange(emptySet())
-                            }) {
-                                Icon(Icons.Default.Warning, contentDescription = "Block")
-                            }
-                        }
-                        
-                        IconButton(onClick = {
-                            threadsToDelete = selectedThreadIds.toList()
-                            onSelectionChange(emptySet())
-                        }) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete")
                         }
                     }
                 )
-            } else if (isSpamView || isArchiveView) {
+            } else if (view != ConversationView.MAIN) {
                 TopAppBar(
-                    title = { Text(if (isSpamView) "Spam" else "Archive") },
+                    title = { Text(if (view == ConversationView.SPAM) "Spam" else "Archive") },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -800,7 +815,7 @@ fun ConversationListScreen(
             }
         },
         floatingActionButton = {
-            if (!isSearchActive && !isSpamView && !isArchiveView && selectedThreadIds.isEmpty()) {
+            if (!isSearchActive && view == ConversationView.MAIN && selectedThreadIds.isEmpty()) {
                 FloatingActionButton(onClick = onNewChat) {
                     Icon(Icons.Default.Add, contentDescription = "New Message")
                 }
@@ -808,7 +823,7 @@ fun ConversationListScreen(
         }
     ) { p ->
         Column(modifier = Modifier.fillMaxSize().padding(p)) {
-            if (!isSpamView && !isArchiveView && selectedThreadIds.isEmpty()) {
+            if (view == ConversationView.MAIN && selectedThreadIds.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -879,13 +894,8 @@ fun ConversationListScreen(
                                     onLongClick = {
                                         onSelectionChange(selectedThreadIds + thread.threadId)
                                     },
-                                    onDelete = { threadsToDelete = listOf(thread.threadId) },
-                                    onBlock = { threadsToBlock = listOf(thread) },
-                                    onUnblock = { onUnblockThreads(listOf(thread)) },
-                                    onArchive = { onArchiveThreads(listOf(thread.threadId)) },
-                                    onUnarchive = { onUnarchiveThreads(listOf(thread.threadId)) },
-                                    isSpamView = isSpamView,
-                                    isArchiveView = isArchiveView
+                                    actions = actions,
+                                    onAction = handleItemAction
                                 )
                                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                             }
@@ -908,10 +918,10 @@ fun ConversationListScreen(
                 } else if (threads.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
-                            text = when {
-                                isSpamView -> "No spam messages"
-                                isArchiveView -> "No archived messages"
-                                else -> "No messages found"
+                            text = when (view) {
+                                ConversationView.SPAM -> "No spam messages"
+                                ConversationView.ARCHIVE -> "No archived messages"
+                                ConversationView.MAIN -> "No messages found"
                             },
                             style = MaterialTheme.typography.bodyLarge
                         )
@@ -941,13 +951,8 @@ fun ConversationListScreen(
                                 onLongClick = {
                                     onSelectionChange(selectedThreadIds + thread.threadId)
                                 },
-                                onDelete = { threadsToDelete = listOf(thread.threadId) },
-                                onBlock = { threadsToBlock = listOf(thread) },
-                                onUnblock = { onUnblockThreads(listOf(thread)) },
-                                onArchive = { onArchiveThreads(listOf(thread.threadId)) },
-                                onUnarchive = { onUnarchiveThreads(listOf(thread.threadId)) },
-                                isSpamView = isSpamView,
-                                isArchiveView = isArchiveView
+                                actions = actions,
+                                onAction = handleItemAction
                             )
                             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                         }
@@ -993,13 +998,8 @@ fun ThreadItem(
     isSelected: Boolean,
     onClick: () -> Unit, 
     onLongClick: () -> Unit,
-    onDelete: () -> Unit,
-    onBlock: () -> Unit,
-    onUnblock: () -> Unit,
-    onArchive: () -> Unit,
-    onUnarchive: () -> Unit,
-    isSpamView: Boolean,
-    isArchiveView: Boolean
+    actions: List<ConversationAction>,
+    onAction: (ActionType, MessageThread) -> Unit
 ) {
     val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
     var showMenu by remember { mutableStateOf(false) }
@@ -1071,13 +1071,8 @@ fun ThreadItem(
             ThreadActionMenu(
                 expanded = showMenu,
                 onDismissRequest = { showMenu = false },
-                isSpamView = isSpamView,
-                isArchiveView = isArchiveView,
-                onArchive = onArchive,
-                onUnarchive = onUnarchive,
-                onBlock = onBlock,
-                onUnblock = onUnblock,
-                onDelete = onDelete
+                actions = actions,
+                onAction = { onAction(it, thread) }
             )
         }
     }
@@ -1256,8 +1251,7 @@ fun ChatScreen(
     refreshTrigger: Int = 0, 
     onBack: () -> Unit, 
     onImageClick: (Uri) -> Unit,
-    isSpamView: Boolean = false,
-    isArchiveView: Boolean = false,
+    view: ConversationView = ConversationView.MAIN,
     onDelete: () -> Unit = {},
     onBlock: () -> Unit = {},
     onUnblock: () -> Unit = {},
@@ -1273,6 +1267,10 @@ fun ChatScreen(
     var isLoading by remember(currentThreadId) { mutableStateOf(currentThreadId != "-1") }
     var showBlockDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+
+    val actions = remember(view) {
+        getConversationActions(view)
+    }
 
     LaunchedEffect(currentThreadId, address, refreshTrigger) {
         isLoading = true
@@ -1319,13 +1317,16 @@ fun ChatScreen(
                 ThreadActionMenu(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false },
-                    isSpamView = isSpamView,
-                    isArchiveView = isArchiveView,
-                    onArchive = onArchive,
-                    onUnarchive = onUnarchive,
-                    onBlock = { showBlockDialog = true },
-                    onUnblock = onUnblock,
-                    onDelete = { showDeleteDialog = true }
+                    actions = actions,
+                    onAction = { type ->
+                        when (type) {
+                            ActionType.DELETE -> showDeleteDialog = true
+                            ActionType.ARCHIVE -> onArchive()
+                            ActionType.UNARCHIVE -> onUnarchive()
+                            ActionType.BLOCK -> showBlockDialog = true
+                            ActionType.UNBLOCK -> onUnblock()
+                        }
+                    }
                 )
             }
         )
