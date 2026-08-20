@@ -303,21 +303,28 @@ fun MainNavigation(initialAddress: String? = null) {
                 .getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
             val manualSpam = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
                 .getStringSet("addresses", emptySet()) ?: emptySet()
+            val manualArchive = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
+                .getStringSet("ids", emptySet()) ?: emptySet()
 
             // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
             // This returns almost instantly from the conversation view.
             val baseThreads = fetchThreadsFast(context, contactCache)
             
             // Apply filtering logic
-            val baseWithSpamCheck = baseThreads.map { t ->
+            val baseWithStatus = baseThreads.map { t ->
                 val isKeywordSpam = keywords.any { t.snippet.contains(it, ignoreCase = true) }
                 val isManualSpam = manualSpam.contains(t.address)
+                val isManualArchived = manualArchive.contains(t.threadId)
+                
                 // Note: thread.isSpam from fetchThreadsFast is based on 'archived' or 'type'
                 // We will now treat 'archived' as ARCHIVED, and keywords/manual list as SPAM.
-                t.copy(isSpam = isKeywordSpam || isManualSpam)
+                t.copy(
+                    isSpam = t.isSpam || isKeywordSpam || isManualSpam,
+                    isArchived = t.isArchived || isManualArchived
+                )
             }
             
-            val filteredBase = baseWithSpamCheck.filter { it.threadId !in pendingDeletions }
+            val filteredBase = baseWithStatus.filter { it.threadId !in pendingDeletions }
             
             threads = if (threads.isEmpty()) {
                 filteredBase
@@ -326,7 +333,8 @@ fun MainNavigation(initialAddress: String? = null) {
                     val existing = threads.find { it.threadId == new.threadId }
                     if (existing != null) {
                         // PRESERVE local spam/archive status if no new messages arrived (avoids stale DB overwrite)
-                        val isSameVersion = abs(new.date - existing.date) < 2000
+                        // Using a slightly larger window (5s) for better stability across reloads
+                        val isSameVersion = abs(new.date - existing.date) < 5000
                         new.copy(
                             snippet = new.snippet.ifBlank { existing.snippet },
                             contactName = new.contactName ?: existing.contactName,
@@ -358,16 +366,18 @@ fun MainNavigation(initialAddress: String? = null) {
                 
                 // Final merge with Phase 2 results
                 threads = finalThreads.map { updated ->
-                    val current = threads.find { it.threadId == updated.threadId }
-                    if (current != null && abs(updated.date - current.date) < 2000) {
+                    val existing = threads.find { it.threadId == updated.threadId }
+                    if (existing != null && abs(updated.date - existing.date) < 5000) {
                         updated.copy(
-                            isSpam = current.isSpam,
-                            isArchived = current.isArchived
+                            isSpam = existing.isSpam,
+                            isArchived = existing.isArchived
                         )
                     } else {
-                        val isKeywordSpam = keywords.any { updated.snippet.contains(it, ignoreCase = true) }
-                        val isManualSpam = manualSpam.contains(updated.address)
-                        updated.copy(isSpam = isKeywordSpam || isManualSpam)
+                        val isManualArchived = manualArchive.contains(updated.threadId)
+                        updated.copy(
+                            isSpam = updated.isSpam,
+                            isArchived = updated.isArchived || isManualArchived
+                        )
                     }
                 }
                 
@@ -428,6 +438,10 @@ fun MainNavigation(initialAddress: String? = null) {
 
     val performArchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
+            val archivePrefs = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
+            val current = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
+            archivePrefs.edit { putStringSet("ids", current + threadIds) }
+
             threadIds.forEach { threadId ->
                 markThreadAsSpam(context, threadId, false)
                 markThreadArchived(context, threadId, true)
@@ -437,11 +451,16 @@ fun MainNavigation(initialAddress: String? = null) {
                 if (it.threadId in ids) it.copy(isArchived = true, isSpam = false) else it
             }
             saveThreadsToCache(context, threads)
+            refreshTrigger++
         }
     }
 
     val performUnarchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
+            val archivePrefs = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
+            val current = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
+            archivePrefs.edit { putStringSet("ids", current - threadIds.toSet()) }
+
             threadIds.forEach { threadId ->
                 markThreadArchived(context, threadId, false)
             }
@@ -450,6 +469,7 @@ fun MainNavigation(initialAddress: String? = null) {
                 if (it.threadId in ids) it.copy(isArchived = false) else it
             }
             saveThreadsToCache(context, threads)
+            refreshTrigger++
         }
     }
 
@@ -1677,8 +1697,10 @@ fun StatusRow(label: String, status: Boolean) {
 
 private fun saveThreadsToCache(context: Context, threads: List<MessageThread>) {
     val prefs = context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE)
-    val serialized = threads.take(30).joinToString("||") { 
-        "${it.threadId}|${it.address}|${it.contactName ?: ""}|${it.snippet.replace("\n", " ")}|${it.date}|${it.read}|${it.isSpam}" 
+    // Cache up to 100 threads to match fetch limit and prevent bounce-back on deeper threads
+    val serialized = threads.take(100).joinToString("||") { 
+        val snippet = it.snippet.replace("|", " ").replace("\n", " ")
+        "${it.threadId}|${it.address}|${it.contactName ?: ""}|$snippet|${it.date}|${it.read}|${it.isSpam}|${it.isArchived}" 
     }
     prefs.edit { putString("cached_list", serialized) }
 }
@@ -1687,16 +1709,18 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
     val prefs = context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE)
     val serialized = prefs.getString("cached_list", null) ?: return emptyList()
     return try {
-        serialized.split("||").map {
+        serialized.split("||").mapNotNull {
             val parts = it.split("|")
+            if (parts.size < 6) return@mapNotNull null
             MessageThread(
                 parts[0], 
                 parts[1], 
                 parts[2].ifBlank { null }, 
                 parts[3], 
-                parts[4].toLong(), 
+                parts[4].toLongOrNull() ?: 0L,
                 parts[5].toBoolean(),
-                if (parts.size > 6) parts[6].toBoolean() else false
+                if (parts.size > 6) parts[6].toBoolean() else false,
+                if (parts.size > 7) parts[7].toBoolean() else false
             )
         }
     } catch (_: Exception) {
@@ -1742,7 +1766,11 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
                 val firstId = recipientIds.split(" ").firstOrNull() ?: ""
                 if (firstId.isNotBlank()) recipientIdSet.add(firstId)
                 
-                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = type == 4, isArchived = archived))
+                // type 4 = Spam, type 2 = Archived (common values)
+                val isSpam = type == 4
+                val isArchived = archived || type == 2
+
+                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = isSpam, isArchived = isArchived))
             }
         }
     } catch (e: Exception) {
@@ -2382,26 +2410,55 @@ private suspend fun unblockNumber(context: Context, number: String) = withContex
 }
 
 private suspend fun markThreadArchived(context: Context, threadId: String, archived: Boolean) = withContext(Dispatchers.IO) {
+    val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    if (!isDefault) {
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Please set SMS Blocker as default to archive messages", Toast.LENGTH_LONG).show()
+        }
+        Log.w("SMSBlocker", "Not default SMS app: markThreadArchived will likely be ignored by the system.")
+    }
+
     val contentResolver = context.contentResolver
     val values = android.content.ContentValues().apply {
         put("archived", if (archived) 1 else 0)
+        // Set type to 2 (Archived) or 0 (Default) to help external apps recognize the status
+        put("type", if (archived) 2 else 0)
     }
     
-    val uris = listOf(
+    val threadUris = listOf(
         "content://mms-sms/conversations/$threadId".toUri(),
-        "content://sms/conversations/$threadId".toUri()
+        "content://sms/conversations/$threadId".toUri(),
+        Uri.withAppendedPath(Telephony.Threads.CONTENT_URI, threadId)
     )
     
-    for (uri in uris) {
+    for (uri in threadUris) {
         try {
             contentResolver.update(uri, values, null, null)
-        } catch (e: Exception) {
-            Log.w("SMSBlocker", "Failed to update archive status at $uri: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
+
+    // Also update the 'archived' flag on individual messages, which some providers use to derive thread status
+    try {
+        val msgValues = android.content.ContentValues().apply {
+            put("archived", if (archived) 1 else 0)
+        }
+        contentResolver.update(Telephony.Sms.CONTENT_URI, msgValues, "${Telephony.Sms.THREAD_ID} = ?", arrayOf(threadId))
+        contentResolver.update("content://mms/".toUri(),
+            msgValues, "thread_id = ?", arrayOf(threadId))
+    } catch (_: Exception) {}
+
+    contentResolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
+    contentResolver.notifyChange("content://mms-sms/conversations/".toUri(), null)
 }
 
 private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam: Boolean) = withContext(Dispatchers.IO) {
+    val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    if (!isDefault) {
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Please set SMS Blocker as default to mark as spam", Toast.LENGTH_LONG).show()
+        }
+    }
+
     val contentResolver = context.contentResolver
     val values = android.content.ContentValues().apply {
         put("archived", if (isSpam) 1 else 0)
@@ -2414,14 +2471,21 @@ private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam:
         "content://mms-sms/conversations/$threadId".toUri(),
         "content://sms/conversations/$threadId".toUri()
     )
-    
+
     for (uri in uris) {
         try {
             contentResolver.update(uri, values, null, null)
-        } catch (e: Exception) {
-            Log.w("SMSBlocker", "Failed to update spam status at $uri: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
+
+    try {
+        val msgValues = android.content.ContentValues().apply {
+            put("archived", if (isSpam) 1 else 0)
+        }
+        contentResolver.update(Telephony.Sms.CONTENT_URI, msgValues, "thread_id = ?", arrayOf(threadId))
+    } catch (_: Exception) {}
+
+    contentResolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
 }
 
 @Composable
