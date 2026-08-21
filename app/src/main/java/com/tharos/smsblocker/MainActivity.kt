@@ -305,6 +305,8 @@ fun MainNavigation(initialAddress: String? = null) {
                 .getStringSet("addresses", emptySet()) ?: emptySet()
             val manualArchive = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
                 .getStringSet("ids", emptySet()) ?: emptySet()
+            val manualUnarchive = context.getSharedPreferences("manual_unarchive", Context.MODE_PRIVATE)
+                .getStringSet("ids", emptySet()) ?: emptySet()
 
             // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
             // This returns almost instantly from the conversation view.
@@ -314,13 +316,19 @@ fun MainNavigation(initialAddress: String? = null) {
             val baseWithStatus = baseThreads.map { t ->
                 val isKeywordSpam = keywords.any { t.snippet.contains(it, ignoreCase = true) }
                 val isManualSpam = manualSpam.contains(t.address)
-                val isManualArchived = manualArchive.contains(t.threadId)
+                val isForcedArchived = manualArchive.contains(t.threadId)
+                val isForcedUnarchived = manualUnarchive.contains(t.threadId)
                 
+                // Trust manual list as override, then fallback to DB status
                 // Note: thread.isSpam from fetchThreadsFast is based on 'archived' or 'type'
                 // We will now treat 'archived' as ARCHIVED, and keywords/manual list as SPAM.
+                val resolvedArchived = if (isForcedArchived) true 
+                                     else if (isForcedUnarchived) false 
+                                     else t.isArchived
+
                 t.copy(
                     isSpam = t.isSpam || isKeywordSpam || isManualSpam,
-                    isArchived = t.isArchived || isManualArchived
+                    isArchived = resolvedArchived
                 )
             }
             
@@ -373,10 +381,11 @@ fun MainNavigation(initialAddress: String? = null) {
                             isArchived = existing.isArchived
                         )
                     } else {
-                        val isManualArchived = manualArchive.contains(updated.threadId)
+                        val isForcedArchived = manualArchive.contains(updated.threadId)
+                        val isForcedUnarchived = manualUnarchive.contains(updated.threadId)
                         updated.copy(
                             isSpam = updated.isSpam,
-                            isArchived = updated.isArchived || isManualArchived
+                            isArchived = if (isForcedArchived) true else if (isForcedUnarchived) false else updated.isArchived
                         )
                     }
                 }
@@ -439,8 +448,13 @@ fun MainNavigation(initialAddress: String? = null) {
     val performArchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
             val archivePrefs = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
-            val current = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
-            archivePrefs.edit { putStringSet("ids", current + threadIds) }
+            val unarchivePrefs = context.getSharedPreferences("manual_unarchive", Context.MODE_PRIVATE)
+            
+            val currentArchived = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
+            val currentUnarchived = unarchivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
+            
+            archivePrefs.edit { putStringSet("ids", currentArchived + threadIds.toSet()) }
+            unarchivePrefs.edit { putStringSet("ids", currentUnarchived - threadIds.toSet()) }
 
             threadIds.forEach { threadId ->
                 markThreadAsSpam(context, threadId, false)
@@ -458,8 +472,13 @@ fun MainNavigation(initialAddress: String? = null) {
     val performUnarchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
             val archivePrefs = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
-            val current = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
-            archivePrefs.edit { putStringSet("ids", current - threadIds.toSet()) }
+            val unarchivePrefs = context.getSharedPreferences("manual_unarchive", Context.MODE_PRIVATE)
+            
+            val currentArchived = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
+            val currentUnarchived = unarchivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
+            
+            archivePrefs.edit { putStringSet("ids", currentArchived - threadIds.toSet()) }
+            unarchivePrefs.edit { putStringSet("ids", currentUnarchived + threadIds.toSet()) }
 
             threadIds.forEach { threadId ->
                 markThreadArchived(context, threadId, false)
