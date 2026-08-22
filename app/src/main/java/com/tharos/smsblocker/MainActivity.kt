@@ -269,6 +269,7 @@ fun MainNavigation(initialAddress: String? = null) {
     var refreshTrigger by rememberSaveable { mutableIntStateOf(0) }
 
     val contactPrefs = remember { context.getSharedPreferences("contact_names", Context.MODE_PRIVATE) }
+    val spamTimestampPrefs = remember { context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE) }
     var contactCache by remember { 
         mutableStateOf(contactPrefs.all.mapValues { it.value.toString() }) 
     }
@@ -356,14 +357,8 @@ fun MainNavigation(initialAddress: String? = null) {
             }
             isLoading = false
             
-            // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names) & Auto-Delete
+            // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names)
             launch {
-                // Auto-delete spam older than 7 days
-                val sevenDaysAgo = System.currentTimeMillis() - (7 * 24 * 60 * 60 * 1000)
-                threads.filter { it.isSpam && it.date < sevenDaysAgo }.forEach { 
-                    deleteThread(context, it.threadId)
-                }
-
                 val updatedWithSnippets = resolveMissingSnippets(context, threads)
                 // Filter again: if snippet is STILL blank after deep sync, it's likely empty
                 val finalFiltered = updatedWithSnippets.filter { 
@@ -387,6 +382,27 @@ fun MainNavigation(initialAddress: String? = null) {
                             isSpam = updated.isSpam,
                             isArchived = if (isForcedArchived) true else if (isForcedUnarchived) false else updated.isArchived
                         )
+                    }
+                }
+                
+                // Track when threads enter spam and auto-delete after 7 days
+                val now = System.currentTimeMillis()
+                val sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000)
+                spamTimestampPrefs.edit {
+                    threads.forEach { thread ->
+                        if (thread.isSpam) {
+                            if (!spamTimestampPrefs.contains(thread.threadId)) putLong(thread.threadId, now)
+                        } else {
+                            remove(thread.threadId)
+                        }
+                    }
+                }
+                
+                val timestamps = spamTimestampPrefs.all
+                threads.filter { it.isSpam }.forEach { thread ->
+                    val addedAt = timestamps[thread.threadId] as? Long ?: 0L
+                    if (addedAt in 1..<sevenDaysAgo) {
+                        deleteThread(context, thread.threadId)
                     }
                 }
                 
@@ -2255,6 +2271,7 @@ private suspend fun deleteThread(context: Context, threadId: String) = withConte
 
     try {
         val contentResolver = context.contentResolver
+        context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE).edit { remove(threadId) }
         
         // 1. Delete the conversation entry itself - this usually deletes associated messages too
         // Try multiple URIs to ensure compatibility
@@ -2471,6 +2488,15 @@ private suspend fun markThreadArchived(context: Context, threadId: String, archi
 }
 
 private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam: Boolean) = withContext(Dispatchers.IO) {
+    val prefs = context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE)
+    prefs.edit {
+        if (isSpam) {
+            if (!prefs.contains(threadId)) putLong(threadId, System.currentTimeMillis())
+        } else {
+            remove(threadId)
+        }
+    }
+
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     if (!isDefault) {
         withContext(Dispatchers.Main) {
