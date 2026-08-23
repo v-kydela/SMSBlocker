@@ -851,6 +851,13 @@ fun ConversationListScreen(
                         }
                     },
                     actions = {
+                        if (selectedThreadIds.size < filteredThreads.size) {
+                            TextButton(onClick = {
+                                onSelectionChange(filteredThreads.map { it.threadId }.toSet())
+                            }) {
+                                Text("ALL")
+                            }
+                        }
                         actions.forEach { action ->
                             IconButton(onClick = { handleBulkAction(action.type) }) {
                                 Icon(action.icon, contentDescription = action.label)
