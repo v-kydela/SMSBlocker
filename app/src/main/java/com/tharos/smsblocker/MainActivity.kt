@@ -1105,7 +1105,9 @@ fun ThreadItem(
                     text = thread.contactName ?: thread.address,
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = if (!thread.read) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = timeFormat.format(Date(thread.date)),
@@ -1365,7 +1367,13 @@ fun ChatScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text(contactName) },
+            title = {
+                Text(
+                    text = contactName,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
