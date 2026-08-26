@@ -993,7 +993,20 @@ fun ConversationListScreen(
                         Text("No results for '$searchQuery'", style = MaterialTheme.typography.bodyLarge)
                     }
                 } else {
-                    LazyColumn {
+                    val listState = rememberLazyListState()
+                    val topThreadId = remember(filteredThreads) { filteredThreads.firstOrNull()?.threadId }
+                    
+                    LaunchedEffect(topThreadId) {
+                        // Automatically scroll to top when a new message arrives at the top
+                        // or when the list is updated, provided we're not deep in the list.
+                        // We use a larger threshold because background updates often shift 
+                        // the list index to preserve the currently viewed item.
+                        if (listState.firstVisibleItemIndex <= 10) {
+                            listState.animateScrollToItem(0)
+                        }
+                    }
+
+                    LazyColumn(state = listState) {
                         items(filteredThreads, key = { it.threadId }) { thread ->
                             ThreadItem(
                                 thread, 
@@ -1772,7 +1785,7 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
                 if (parts.size > 6) parts[6].toBoolean() else false,
                 if (parts.size > 7) parts[7].toBoolean() else false
             )
-        }
+        }.sortedByDescending { it.date }
     } catch (_: Exception) {
         emptyList()
     }
@@ -1807,7 +1820,14 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
                 if (messageCount == 0) continue
 
                 val snippet = c.getString(snippetIdx) ?: ""
-                val date = c.getLong(dateIdx)
+                var date = c.getLong(dateIdx)
+                // Normalize dates: MMS is often in seconds, while SMS is in milliseconds
+                if (date < 10000000000L) date *= 1000
+                
+                // Cap date to prevent future-dated messages from sticking to the top
+                val now = System.currentTimeMillis()
+                if (date > now + 60000) date = now
+
                 val read = c.getInt(readIdx) == 1
                 val recipientIds = c.getString(recipientIdsIdx) ?: ""
                 val type = if (typeIdx != -1) c.getInt(typeIdx) else 0
@@ -1853,7 +1873,7 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
             address = addr,
             contactName = contactCache[normalized]
         )
-    }
+    }.sortedByDescending { it.date }
 }
 
 private suspend fun fetchThreadsFastLegacy(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
@@ -1882,7 +1902,14 @@ private suspend fun fetchThreadsFastLegacy(context: Context, contactCache: Map<S
                 if (messageCount == 0) continue
 
                 val snippet = c.getString(snippetIdx) ?: ""
-                val date = c.getLong(dateIdx)
+                var date = c.getLong(dateIdx)
+                // Normalize dates: MMS is often in seconds, while SMS is in milliseconds
+                if (date < 10000000000L) date *= 1000
+                
+                // Cap date to prevent future-dated messages from sticking to the top
+                val now = System.currentTimeMillis()
+                if (date > now + 60000) date = now
+
                 val read = c.getInt(readIdx) == 1
                 val recipientIds = c.getString(recipientIdsIdx) ?: ""
                 
@@ -1921,7 +1948,7 @@ private suspend fun fetchThreadsFastLegacy(context: Context, contactCache: Map<S
             address = addr,
             contactName = contactCache[normalized]
         )
-    }
+    }.sortedByDescending { it.date }
 }
 
 private suspend fun resolveMissingSnippets(context: Context, threads: List<MessageThread>): List<MessageThread> = withContext(Dispatchers.IO) {
