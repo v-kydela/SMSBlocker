@@ -309,6 +309,23 @@ fun MainNavigation(initialAddress: String? = null) {
             val manualUnarchive = context.getSharedPreferences("manual_unarchive", Context.MODE_PRIVATE)
                 .getStringSet("ids", emptySet()) ?: emptySet()
 
+            // Phase 0: Ultra-fast check for new messages
+            // Querying only the SMS table is significantly faster than the joined conversation view
+            val latestUpdates = fetchLatestThreadTimestamps(context)
+            if (latestUpdates.isNotEmpty()) {
+                val hasNewer = latestUpdates.any { (tid, date) ->
+                    val existing = threads.find { it.threadId == tid }
+                    existing == null || date > existing.date + 1000
+                }
+                if (hasNewer) {
+                    // Update dates in current list immediately to bring new threads to top
+                    threads = threads.map { t ->
+                        val newDate = latestUpdates[t.threadId]
+                        if (newDate != null && newDate > t.date) t.copy(date = newDate, read = false) else t
+                    }.sortedByDescending { it.date }
+                }
+            }
+
             // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
             // This returns almost instantly from the conversation view.
             val baseThreads = fetchThreadsFast(context, contactCache)
@@ -1791,11 +1808,35 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
     }
 }
 
+private suspend fun fetchLatestThreadTimestamps(context: Context): Map<String, Long> = withContext(Dispatchers.IO) {
+    val timestamps = mutableMapOf<String, Long>()
+    try {
+        // Querying the SMS table for just thread_id and date is extremely fast
+        context.contentResolver.query(
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.DATE),
+            null, null, "date DESC LIMIT 15"
+        )?.use { c ->
+            val tidIdx = c.getColumnIndex(Telephony.Sms.THREAD_ID)
+            val dateIdx = c.getColumnIndex(Telephony.Sms.DATE)
+            while (c.moveToNext()) {
+                val tid = c.getString(tidIdx)
+                val date = c.getLong(dateIdx)
+                if (tid != null) {
+                    timestamps[tid] = maxOf(timestamps[tid] ?: 0L, date)
+                }
+            }
+        }
+    } catch (_: Exception) {}
+    timestamps
+}
+
 private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
+    // Use simple=true and a limited projection for speed. 
+    // We include 'type' and 'archived' for filtering, but omit 'message_count' as it is slow.
     val uri = "content://mms-sms/conversations?simple=true".toUri()
-    // Include 'archived', 'type' and 'message_count'
-    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type", "archived", "message_count")
+    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type", "archived")
     val sortOrder = "date DESC LIMIT 100" // Fetch more to find spam
 
     val baseThreads = mutableListOf<MessageThread>()
@@ -2020,8 +2061,16 @@ private suspend fun resolveThreadDetails(context: Context, threads: List<Message
     if (uniqueAddresses.isNotEmpty()) {
         val contactUri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
         val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+        
+        // Optimize: Use IN selection to avoid querying entire contact database
+        val selection = if (uniqueAddresses.size <= 50) {
+            val placeholders = uniqueAddresses.indices.joinToString(",") { "?" }
+            "${ContactsContract.CommonDataKinds.Phone.NUMBER} IN ($placeholders)"
+        } else null
+        val selectionArgs = if (uniqueAddresses.size <= 50) uniqueAddresses.toTypedArray() else null
+
         try {
-            contentResolver.query(contactUri, projection, null, null, null)?.use { cursor ->
+            contentResolver.query(contactUri, projection, selection, selectionArgs, null)?.use { cursor ->
                 val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
                 val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
                 while (cursor.moveToNext()) {
