@@ -52,6 +52,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -181,8 +183,8 @@ data class ConversationAction(
 private val ALL_ACTIONS by lazy {
     mapOf(
         ActionType.DELETE to ConversationAction(ActionType.DELETE, "Delete", Icons.Default.Delete),
-        ActionType.ARCHIVE to ConversationAction(ActionType.ARCHIVE, "Archive", Icons.Default.Delete),
-        ActionType.UNARCHIVE to ConversationAction(ActionType.UNARCHIVE, "Unarchive", Icons.AutoMirrored.Filled.ArrowBack),
+        ActionType.ARCHIVE to ConversationAction(ActionType.ARCHIVE, "Archive", Icons.Default.Archive),
+        ActionType.UNARCHIVE to ConversationAction(ActionType.UNARCHIVE, "Unarchive", Icons.Default.Unarchive),
         ActionType.BLOCK to ConversationAction(ActionType.BLOCK, "Block & Report Spam", Icons.Default.Warning, Color.Red),
         ActionType.UNBLOCK to ConversationAction(ActionType.UNBLOCK, "Not Spam / Unblock", Icons.Default.Check)
     )
@@ -932,7 +934,7 @@ fun ConversationListScreen(
                                     } else {
                                         Row {
                                             IconButton(onClick = onArchiveClick) {
-                                                Icon(Icons.Default.Delete, contentDescription = "Archive", tint = MaterialTheme.colorScheme.outline)
+                                                Icon(Icons.Default.Archive, contentDescription = "Archive", tint = MaterialTheme.colorScheme.outline)
                                             }
                                             IconButton(onClick = onSpamClick) {
                                                 Icon(Icons.Default.Warning, contentDescription = "Spam", tint = MaterialTheme.colorScheme.outline)
