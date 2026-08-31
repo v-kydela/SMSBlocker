@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -540,10 +541,8 @@ fun MainNavigation(initialAddress: String? = null) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Scaffold { padding ->
-            Box(modifier = Modifier.padding(padding)) {
-                when (currentScreen) {
-                    "threads" -> ConversationListScreen(
+        when (currentScreen) {
+            "threads" -> ConversationListScreen(
                         threads = threads.filter { !it.isSpam && !it.isArchived },
                         isLoading = isLoading,
                         hasPermissions = hasRequiredPermissions,
@@ -690,8 +689,6 @@ fun MainNavigation(initialAddress: String? = null) {
                         onBack = { currentScreen = "threads" }
                     )
                 }
-            }
-        }
 
         selectedImageUri?.let { uri ->
             FullScreenImage(uri = uri, onDismiss = { selectedImageUri = null })
@@ -860,6 +857,7 @@ fun ConversationListScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             if (selectedThreadIds.isNotEmpty()) {
                 TopAppBar(
@@ -908,7 +906,7 @@ fun ConversationListScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
                 ) {
                     SearchBar(
                         inputField = {
@@ -1198,17 +1196,20 @@ fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("New Message") },
-            navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                title = { Text("New Message") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
                 }
-            }
-        )
-
-        Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+            )
+        }
+    ) { p ->
+        Column(modifier = Modifier.fillMaxSize().padding(p).padding(horizontal = 16.dp)) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -1397,119 +1398,126 @@ fun ChatScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = {
-                Text(
-                    text = contactName,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            },
-            navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                }
-            },
-            actions = {
-                var showMenu by remember { mutableStateOf(false) }
-                IconButton(onClick = { showMenu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "More options")
-                }
-                ThreadActionMenu(
-                    expanded = showMenu,
-                    onDismissRequest = { showMenu = false },
-                    actions = actions,
-                    onAction = { type ->
-                        when (type) {
-                            ActionType.DELETE -> showDeleteDialog = true
-                            ActionType.ARCHIVE -> onArchive()
-                            ActionType.UNARCHIVE -> onUnarchive()
-                            ActionType.BLOCK -> showBlockDialog = true
-                            ActionType.UNBLOCK -> onUnblock()
-                        }
-                    }
-                )
-            }
-        )
-
-        if (showBlockDialog) {
-            BlockThreadConfirmationDialog(
-                contactName = contactName,
-                onConfirm = {
-                    showBlockDialog = false
-                    onBlock()
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = contactName,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 },
-                onDismiss = { showBlockDialog = false }
-            )
-        }
-
-        if (showDeleteDialog) {
-            DeleteThreadConfirmationDialog(
-                contactName = contactName,
-                onConfirm = {
-                    showDeleteDialog = false
-                    onDelete()
-                },
-                onDismiss = { showDeleteDialog = false }
-            )
-        }
-
-        Box(modifier = Modifier.weight(1f)) {
-            if (isLoading && messages.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-            }
-
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                state = listState,
-                reverseLayout = true
-            ) {
-                items(messages.asReversed()) { message ->
-                    MessageBubble(message, onImageClick = onImageClick)
-                }
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextField(
-                value = textValue,
-                onValueChange = { textValue = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Text message") },
-                shape = RoundedCornerShape(24.dp),
-                colors = TextFieldDefaults.colors(
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent
-                )
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    if (textValue.isNotBlank()) {
-                        val body = textValue
-                        textValue = ""
-                        scope.launch {
-                            sendMessage(context, address, body, if (currentThreadId == "-1") null else currentThreadId)
-                            if (currentThreadId == "-1") {
-                                currentThreadId = fetchThreadIdByAddress(context, address) ?: "-1"
-                            }
-                            messages = if (currentThreadId != "-1") {
-                                fetchMessagesForThread(context, currentThreadId)
-                            } else {
-                                messages + ChatMessage("temp", body, System.currentTimeMillis(), true)
-                            }
-                        }
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
-                enabled = textValue.isNotBlank()
+                actions = {
+                    var showMenu by remember { mutableStateOf(false) }
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                    }
+                    ThreadActionMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false },
+                        actions = actions,
+                        onAction = { type ->
+                            when (type) {
+                                ActionType.DELETE -> showDeleteDialog = true
+                                ActionType.ARCHIVE -> onArchive()
+                                ActionType.UNARCHIVE -> onUnarchive()
+                                ActionType.BLOCK -> showBlockDialog = true
+                                ActionType.UNBLOCK -> onUnblock()
+                            }
+                        }
+                    )
+                }
+            )
+        }
+    ) { p ->
+        Column(modifier = Modifier.fillMaxSize().padding(p)) {
+            if (showBlockDialog) {
+                BlockThreadConfirmationDialog(
+                    contactName = contactName,
+                    onConfirm = {
+                        showBlockDialog = false
+                        onBlock()
+                    },
+                    onDismiss = { showBlockDialog = false }
+                )
+            }
+
+            if (showDeleteDialog) {
+                DeleteThreadConfirmationDialog(
+                    contactName = contactName,
+                    onConfirm = {
+                        showDeleteDialog = false
+                        onDelete()
+                    },
+                    onDismiss = { showDeleteDialog = false }
+                )
+            }
+
+            Box(modifier = Modifier.weight(1f)) {
+                if (isLoading && messages.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                    state = listState,
+                    reverseLayout = true
+                ) {
+                    items(messages.asReversed()) { message ->
+                        MessageBubble(message, onImageClick = onImageClick)
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
+                TextField(
+                    value = textValue,
+                    onValueChange = { textValue = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Text message") },
+                    shape = RoundedCornerShape(24.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent
+                    )
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(
+                    onClick = {
+                        if (textValue.isNotBlank()) {
+                            val body = textValue
+                            textValue = ""
+                            scope.launch {
+                                sendMessage(context, address, body, if (currentThreadId == "-1") null else currentThreadId)
+                                if (currentThreadId == "-1") {
+                                    currentThreadId = fetchThreadIdByAddress(context, address) ?: "-1"
+                                    if (currentThreadId == "-1") {
+                                        // Still no thread ID, maybe it's a new message that hasn't hit DB yet
+                                        messages = messages + ChatMessage("temp_${System.currentTimeMillis()}", body, System.currentTimeMillis(), true)
+                                    }
+                                }
+                                if (currentThreadId != "-1") {
+                                    messages = fetchMessagesForThread(context, currentThreadId)
+                                }
+                            }
+                        }
+                    },
+                    enabled = textValue.isNotBlank()
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
+                }
             }
         }
     }
@@ -1667,9 +1675,23 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
         isDefaultSmsApp = Telephony.Sms.getDefaultSmsPackage(context) == packageName
     }
 
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        item {
-            Text("Blocker Settings", style = MaterialTheme.typography.headlineMedium)
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { p ->
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(p).padding(horizontal = 16.dp, vertical = 0.dp)) {
+            item {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Blocker Settings", style = MaterialTheme.typography.headlineMedium)
             Spacer(modifier = Modifier.height(16.dp))
             
             StatusRow(label = "Permissions", status = hasPermission)
@@ -1770,6 +1792,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
             }
         }
     }
+}
 }
 
 @Composable
