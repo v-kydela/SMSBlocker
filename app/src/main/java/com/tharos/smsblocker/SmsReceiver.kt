@@ -84,6 +84,21 @@ class SmsReceiver : BroadcastReceiver() {
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
 
+        // Extract OTP and add "Copy" action if found
+        val otpCode = extractOtp(body)
+        if (otpCode != null) {
+            val copyIntent = Intent(context, CopyOtpReceiver::class.java).apply {
+                putExtra("otp_code", otpCode)
+            }
+            val copyPendingIntent = PendingIntent.getBroadcast(
+                context,
+                otpCode.hashCode(),
+                copyIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(android.R.drawable.ic_menu_edit, "Copy $otpCode", copyPendingIntent)
+        }
+
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
     }

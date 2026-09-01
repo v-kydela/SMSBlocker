@@ -48,6 +48,10 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".CopyOtpReceiver"
+            android:exported="false" />
+
         <!-- Service that delivers messages from the phone "quick response" features -->
         <service
             android:name=".HeadlessSmsSendService"

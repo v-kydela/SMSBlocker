@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.role.RoleManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
@@ -57,6 +59,7 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
@@ -1525,6 +1528,7 @@ fun ChatScreen(
 
 @Composable
 fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
+    val context = LocalContext.current
     val alignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
     val color = if (message.isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
     val textColor = if (message.isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
@@ -1590,6 +1594,35 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                                 style = MaterialTheme.typography.bodyLarge
                             )
                         }
+                        
+                        val otpCode = remember(message.body) { extractOtp(message.body) }
+                        if (otpCode != null) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            AssistChip(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    val clip = ClipData.newPlainText("OTP Code", otpCode)
+                                    clipboard.setPrimaryClip(clip)
+                                    Toast.makeText(context, "Code copied", Toast.LENGTH_SHORT).show()
+                                },
+                                label = { Text("Copy $otpCode", color = textColor) },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.ContentCopy,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(AssistChipDefaults.IconSize),
+                                        tint = textColor
+                                    )
+                                },
+                                colors = AssistChipDefaults.assistChipColors(
+                                    labelColor = textColor,
+                                    leadingIconContentColor = textColor,
+                                    containerColor = if (message.isMe) color.copy(alpha = 0.8f) else color.copy(alpha = 0.5f)
+                                ),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, textColor.copy(alpha = 0.3f))
+                            )
+                        }
+
                         Text(
                             text = timeFormat.format(Date(message.date)),
                             color = textColor.copy(alpha = 0.7f),
