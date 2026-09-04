@@ -207,6 +207,7 @@ fun getConversationActions(view: ConversationView): List<ConversationAction> {
 
 class MainActivity : ComponentActivity() {
     private val initialAddress = mutableStateOf<String?>(null)
+    private val openSpam = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -214,10 +215,14 @@ class MainActivity : ComponentActivity() {
         createNotificationChannel(this)
         
         initialAddress.value = intent.getStringExtra("address")
+        openSpam.value = intent.getBooleanExtra("open_spam", false)
 
         setContent {
             SMSBlockerTheme {
-                MainNavigation(initialAddress = initialAddress.value)
+                MainNavigation(
+                    initialAddress = initialAddress.value,
+                    shouldOpenSpam = openSpam.value
+                )
             }
         }
     }
@@ -226,6 +231,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         initialAddress.value = intent.getStringExtra("address")
+        openSpam.value = intent.getBooleanExtra("open_spam", false)
     }
 }
 
@@ -244,7 +250,7 @@ fun createNotificationChannel(context: Context) {
 }
 
 @Composable
-fun MainNavigation(initialAddress: String? = null) {
+fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = false) {
     var currentScreen by rememberSaveable { mutableStateOf("threads") }
     var returnToScreen by rememberSaveable { mutableStateOf("threads") }
     var selectedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -253,8 +259,10 @@ fun MainNavigation(initialAddress: String? = null) {
     var selectedImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var selectedThreadIds by rememberSaveable { mutableStateOf(setOf<String>()) }
 
-    LaunchedEffect(initialAddress) {
-        if (initialAddress != null) {
+    LaunchedEffect(initialAddress, shouldOpenSpam) {
+        if (shouldOpenSpam) {
+            currentScreen = "spam"
+        } else if (initialAddress != null) {
             selectedAddress = initialAddress
             selectedThreadId = null // Force reload by address
             currentScreen = "chat_by_address"

@@ -6,11 +6,14 @@ import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.BlockedNumberContract
 import android.provider.Telephony
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.content.edit
+import androidx.core.net.toUri
 
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -43,25 +46,49 @@ class SmsReceiver : BroadcastReceiver() {
             val isSpam = keywords.any { body.contains(it, ignoreCase = true) }
 
             if (isSpam) {
-                Log.d("SmsReceiver", "Spam keyword detected! Blocking.")
+                Log.d("SmsReceiver", "Spam keyword detected! Saving to spam folder.")
                 blockSender(context, sender)
                 
-                // If we are the default app (receiving SMS_DELIVER), 
-                // NOT saving it to the database effectively blocks it from appearing.
-                Toast.makeText(context, "Spam blocked from $sender", Toast.LENGTH_LONG).show()
+                if (isDefaultApp) {
+                    saveToTelephony(context, sender, body, timestamp, isSpam = true)
+                }
                 
-                // In SMS_RECEIVED (non-default), we can't stop the message 
-                // from reaching the default app, but we've already blocked the number for the future.
+                // Notify the user that a message was blocked so they can find it in the spam folder
+                showBlockedNotification(context, sender, body)
             } else {
-                if (action == Telephony.Sms.Intents.SMS_DELIVER_ACTION) {
+                if (isDefaultApp) {
                     // If we are the default app and it's NOT spam, 
                     // we MUST manually save it to the system provider as a single combined message.
-                    saveToTelephony(context, firstMessage.originatingAddress ?: sender, body, timestamp)
+                    saveToTelephony(context, firstMessage.originatingAddress ?: sender, body, timestamp, isSpam = false)
                 }
                 // Notify the user about the new legitimate message
                 showNotification(context, sender, body)
             }
         }
+    }
+
+    private fun showBlockedNotification(context: Context, sender: String, body: String) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            putExtra("open_spam", true)
+        }
+        val pendingIntent: PendingIntent = PendingIntent.getActivity(
+            context, 
+            sender.hashCode() + 1, 
+            intent, 
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val builder = NotificationCompat.Builder(context, "sms_channel")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Spam blocked from $sender")
+            .setContentText("Message moved to spam folder.")
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(sender.hashCode(), builder.build())
     }
 
     private fun showNotification(context: Context, sender: String, body: String) {
@@ -103,16 +130,37 @@ class SmsReceiver : BroadcastReceiver() {
         notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
     }
 
-    private fun saveToTelephony(context: Context, sender: String, body: String, timestamp: Long) {
+    private fun saveToTelephony(context: Context, sender: String, body: String, timestamp: Long, isSpam: Boolean) {
         try {
             val values = ContentValues().apply {
                 put(Telephony.Sms.ADDRESS, sender)
                 put(Telephony.Sms.BODY, body)
                 put(Telephony.Sms.DATE, timestamp)
-                put(Telephony.Sms.READ, 0)
+                put(Telephony.Sms.READ, if (isSpam) 1 else 0)
                 put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_INBOX)
             }
-            context.contentResolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values)
+            val uri = context.contentResolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values)
+            
+            if (isSpam && uri != null) {
+                // Try to mark the thread as spam immediately so it doesn't appear in the main inbox
+                val threadId = context.contentResolver.query(uri, arrayOf("thread_id"), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                }
+                
+                if (threadId != null) {
+                    val threadValues = ContentValues().apply {
+                        put("type", 4) // SPAM
+                        put("archived", 1)
+                    }
+                    val threadUri = "content://mms-sms/conversations/$threadId".toUri()
+                    context.contentResolver.update(threadUri, threadValues, null, null)
+                    
+                    // Record timestamp for auto-deletion after 7 days (handled in MainActivity)
+                    context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE).edit {
+                        putLong(threadId, System.currentTimeMillis())
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e("SmsReceiver", "Error saving message to provider", e)
         }
