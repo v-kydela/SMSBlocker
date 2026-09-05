@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -789,6 +790,22 @@ fun DeleteThreadConfirmationDialog(
 }
 
 @Composable
+fun AppScaffold(
+    modifier: Modifier = Modifier,
+    topBar: @Composable () -> Unit = {},
+    floatingActionButton: @Composable () -> Unit = {},
+    content: @Composable (PaddingValues) -> Unit
+) {
+    Scaffold(
+        modifier = modifier,
+        topBar = topBar,
+        floatingActionButton = floatingActionButton,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        content = content
+    )
+}
+
+@Composable
 fun BlockThreadConfirmationDialog(
     contactName: String,
     onConfirm: () -> Unit,
@@ -868,8 +885,7 @@ fun ConversationListScreen(
         }
     }
 
-    Scaffold(
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    AppScaffold(
         topBar = {
             if (selectedThreadIds.isNotEmpty()) {
                 TopAppBar(
@@ -1208,8 +1224,7 @@ fun NewChatScreen(onBack: () -> Unit, onStartChat: (String) -> Unit) {
         }
     }
 
-    Scaffold(
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    AppScaffold(
         topBar = {
             TopAppBar(
                 title = { Text("New Message") },
@@ -1410,8 +1425,7 @@ fun ChatScreen(
         }
     }
 
-    Scaffold(
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    AppScaffold(
         topBar = {
             TopAppBar(
                 title = {
@@ -1720,8 +1734,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
         isDefaultSmsApp = Telephony.Sms.getDefaultSmsPackage(context) == packageName
     }
 
-    Scaffold(
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    AppScaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Settings") },
