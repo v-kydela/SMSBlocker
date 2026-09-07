@@ -10,22 +10,22 @@
         android:translateY="2">
         <path
             android:fillColor="#22000000"
-            android:pathData="M30,34h48c4.4,0 8,3.6 8,8v32c0,4.4 -3.6,8 -8,8H46l-12,12v-12h-4c-4.4,0 -8,-3.6 -8,-8V42C22,37.6 25.6,34 30,34z"/>
+            android:pathData="M34,35h40c4.4,0 8,3.6 8,8v26c0,4.4 -3.6,8 -8,8H48l-10,10v-10h-4c-4.4,0 -8,-3.6 -8,-8V43C26,38.6 29.6,35 34,35z"/>
     </group>
 
     <!-- Main Message Bubble -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M30,32h48c4.4,0 8,3.6 8,8v32c0,4.4 -3.6,8 -8,8H46l-12,12v-12h-4c-4.4,0 -8,-3.6 -8,-8V40C22,35.6 25.6,32 30,32z"/>
+        android:pathData="M34,33h40c4.4,0 8,3.6 8,8v26c0,4.4 -3.6,8 -8,8H48l-10,10v-10h-4c-4.4,0 -8,-3.6 -8,-8V41C26,36.6 29.6,33 34,33z"/>
 
     <!-- Larger, more traditional Shield Symbol -->
     <path
         android:fillColor="#1976D2"
-        android:pathData="M54,36c-2,0 -11,0 -14,4v16c0,8 14,14 14,14s14,-6 14,-14V40C65,36 56,36 54,36z"/>
+        android:pathData="M54,37c-2,0 -11,0 -14,4v16c0,8 14,14 14,14s14,-6 14,-14V41C65,37 56,37 54,37z"/>
 
     <!-- Blocking 'X' inside Shield -->
     <path
-        android:pathData="M48,46l12,12m0,-12l-12,12"
+        android:pathData="M48,47l12,12m0,-12l-12,12"
         android:strokeWidth="2.5"
         android:strokeColor="#FFFFFF"
         android:strokeLineCap="round"/>
