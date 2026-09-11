@@ -1558,7 +1558,7 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
     val alignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
     val color = if (message.isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
     val textColor = if (message.isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
-    val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
     
     val bubbleShape = if (message.isMe) {
         RoundedCornerShape(16.dp, 16.dp, 2.dp, 16.dp)
