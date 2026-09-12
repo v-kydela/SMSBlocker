@@ -389,6 +389,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                 }
             }
             isLoading = false
+            saveThreadsToCache(context, threads)
             
             // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names)
             launch {
@@ -1044,9 +1045,9 @@ fun ConversationListScreen(
                     LaunchedEffect(topThreadId) {
                         // Automatically scroll to top when a new message arrives at the top
                         // or when the list is updated, provided we're not deep in the list.
-                        // We use a larger threshold because background updates often shift 
-                        // the list index to preserve the currently viewed item.
-                        if (listState.firstVisibleItemIndex <= 10) {
+                        // We use a larger threshold (25) to handle bulk updates where many
+                        // items might be inserted at once (e.g. initial load vs cache).
+                        if (listState.firstVisibleItemIndex <= 25) {
                             listState.animateScrollToItem(0)
                         }
                     }
@@ -1894,17 +1895,37 @@ private fun loadThreadsFromCache(context: Context): List<MessageThread> {
 private suspend fun fetchLatestThreadTimestamps(context: Context): Map<String, Long> = withContext(Dispatchers.IO) {
     val timestamps = mutableMapOf<String, Long>()
     try {
-        // Querying the SMS table for just thread_id and date is extremely fast
+        // Querying both SMS and MMS tables for latest activity
+        val smsUri = Telephony.Sms.CONTENT_URI
+        val mmsUri = Telephony.Mms.CONTENT_URI
+        
         context.contentResolver.query(
-            Telephony.Sms.CONTENT_URI,
+            smsUri,
             arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.DATE),
-            null, null, "date DESC LIMIT 15"
+            null, null, "date DESC LIMIT 20"
         )?.use { c ->
             val tidIdx = c.getColumnIndex(Telephony.Sms.THREAD_ID)
             val dateIdx = c.getColumnIndex(Telephony.Sms.DATE)
             while (c.moveToNext()) {
                 val tid = c.getString(tidIdx)
-                val date = c.getLong(dateIdx)
+                var date = c.getLong(dateIdx)
+                if (date < 10000000000L) date *= 1000
+                if (tid != null) {
+                    timestamps[tid] = maxOf(timestamps[tid] ?: 0L, date)
+                }
+            }
+        }
+        
+        context.contentResolver.query(
+            mmsUri,
+            arrayOf(Telephony.Mms.THREAD_ID, Telephony.Mms.DATE),
+            null, null, "date DESC LIMIT 20"
+        )?.use { c ->
+            val tidIdx = c.getColumnIndex(Telephony.Mms.THREAD_ID)
+            val dateIdx = c.getColumnIndex(Telephony.Mms.DATE)
+            while (c.moveToNext()) {
+                val tid = c.getString(tidIdx)
+                var date = c.getLong(dateIdx) * 1000 // MMS date is always in seconds
                 if (tid != null) {
                     timestamps[tid] = maxOf(timestamps[tid] ?: 0L, date)
                 }
@@ -1917,10 +1938,10 @@ private suspend fun fetchLatestThreadTimestamps(context: Context): Map<String, L
 private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
     val contentResolver: ContentResolver = context.contentResolver
     // Use simple=true and a limited projection for speed. 
-    // We include 'type' and 'archived' for filtering, but omit 'message_count' as it is slow.
     val uri = "content://mms-sms/conversations?simple=true".toUri()
     val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "type", "archived")
-    val sortOrder = "date DESC LIMIT 100" // Fetch more to find spam
+    // Fetch a larger batch to account for mixed unit (s vs ms) sorting issues in SQL
+    val sortOrder = "date DESC LIMIT 250"
 
     val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
@@ -2004,7 +2025,7 @@ private suspend fun fetchThreadsFastLegacy(context: Context, contactCache: Map<S
     val contentResolver: ContentResolver = context.contentResolver
     val uri = "content://mms-sms/conversations?simple=true".toUri()
     val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "message_count")
-    val sortOrder = "date DESC LIMIT 30"
+    val sortOrder = "date DESC LIMIT 100" // Increased from 30
 
     val baseThreads = mutableListOf<MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
