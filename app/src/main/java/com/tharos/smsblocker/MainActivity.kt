@@ -30,7 +30,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -112,8 +115,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -1589,6 +1594,8 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                             )
                         }
                         if (message.body.isNotBlank()) {
+                            val uriHandler = LocalUriHandler.current
+                            var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
                             val annotatedString = buildAnnotatedString {
                                 val text = message.body
                                 val matcher = Patterns.WEB_URL.matcher(text)
@@ -1599,7 +1606,7 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                                     val start = this.length
                                     append(url)
                                     addLink(
-                                        url = LinkAnnotation.Url(
+                                        LinkAnnotation.Url(
                                             url = url,
                                             styles = TextLinkStyles(
                                                 style = SpanStyle(
@@ -1608,8 +1615,8 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                                                 )
                                             )
                                         ),
-                                        start = start,
-                                        end = this.length
+                                        start,
+                                        this.length
                                     )
                                     lastIndex = matcher.end()
                                 }
@@ -1618,7 +1625,29 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                             Text(
                                 text = annotatedString,
                                 color = textColor,
-                                style = MaterialTheme.typography.bodyLarge
+                                style = MaterialTheme.typography.bodyLarge,
+                                onTextLayout = { textLayoutResult = it },
+                                modifier = Modifier.pointerInput(annotatedString) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        val up = waitForUpOrCancellation()
+                                        if (up != null && down.id == up.id) {
+                                            textLayoutResult?.let { layoutResult ->
+                                                val position = layoutResult.getOffsetForPosition(up.position)
+                                                annotatedString.getLinkAnnotations(position, position).firstOrNull()?.let { annotation ->
+                                                    (annotation.item as? LinkAnnotation.Url)?.let { urlAnnotation ->
+                                                        try {
+                                                            uriHandler.openUri(urlAnnotation.url)
+                                                            up.consume()
+                                                        } catch (e: Exception) {
+                                                            Log.e("SMSBlocker", "Failed to open link: ${urlAnnotation.url}", e)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             )
                         }
                         
@@ -1925,7 +1954,7 @@ private suspend fun fetchLatestThreadTimestamps(context: Context): Map<String, L
             val dateIdx = c.getColumnIndex(Telephony.Mms.DATE)
             while (c.moveToNext()) {
                 val tid = c.getString(tidIdx)
-                var date = c.getLong(dateIdx) * 1000 // MMS date is always in seconds
+                val date = c.getLong(dateIdx) * 1000 // MMS date is always in seconds
                 if (tid != null) {
                     timestamps[tid] = maxOf(timestamps[tid] ?: 0L, date)
                 }
