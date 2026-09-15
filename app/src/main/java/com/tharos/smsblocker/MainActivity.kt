@@ -2216,6 +2216,15 @@ private suspend fun resolveThreadDetails(context: Context, threads: List<Message
             Log.e("SMSBlocker", "Error fetching contacts bulk", e)
         }
 
+        // Also ensure the 20 most recent chats are cached regardless of whether they have a contact name
+        threads.take(20).forEach { thread ->
+            val normalized = thread.address.replace(Regex("[^0-9+]"), "")
+            if (normalized.isNotBlank() && !contactMap.containsKey(normalized)) {
+                val existingCached = context.getSharedPreferences("contact_names", Context.MODE_PRIVATE).getString(normalized, null)
+                contactMap[normalized] = existingCached ?: thread.address
+            }
+        }
+
         // Update persistent cache
         context.getSharedPreferences("contact_names", Context.MODE_PRIVATE).edit {
             contactMap.forEach { (num, name) -> putString(num, name) }
