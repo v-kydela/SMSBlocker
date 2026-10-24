@@ -321,14 +321,10 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
         if (hasRequiredPermissions && (currentScreen == "threads" || currentScreen == "spam" || currentScreen == "archived")) {
             if (threads.isEmpty()) isLoading = true
             
-            val keywords = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
-                .getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
-            val manualSpam = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
-                .getStringSet("addresses", emptySet()) ?: emptySet()
-            val manualArchive = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
-                .getStringSet("ids", emptySet()) ?: emptySet()
-            val manualUnarchive = context.getSharedPreferences("manual_unarchive", Context.MODE_PRIVATE)
-                .getStringSet("ids", emptySet()) ?: emptySet()
+            val keywords = getBlockerKeywords(context)
+            val manualSpam = getManualSpam(context)
+            val manualArchive = getManualArchive(context)
+            val manualUnarchive = getManualUnarchive(context)
 
             // Phase 0: Ultra-fast check for new messages
             // Querying only the SMS table is significantly faster than the joined conversation view
@@ -502,14 +498,11 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
 
     val performArchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
-            val archivePrefs = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
-            val unarchivePrefs = context.getSharedPreferences("manual_unarchive", Context.MODE_PRIVATE)
+            val currentArchived = getManualArchive(context)
+            val currentUnarchived = getManualUnarchive(context)
             
-            val currentArchived = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
-            val currentUnarchived = unarchivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
-            
-            archivePrefs.edit { putStringSet("ids", currentArchived + threadIds.toSet()) }
-            unarchivePrefs.edit { putStringSet("ids", currentUnarchived - threadIds.toSet()) }
+            saveManualArchive(context, currentArchived + threadIds.toSet())
+            saveManualUnarchive(context, currentUnarchived - threadIds.toSet())
 
             threadIds.forEach { threadId ->
                 markThreadAsSpam(context, threadId, false)
@@ -526,14 +519,11 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
 
     val performUnarchive: (List<String>) -> Unit = { threadIds ->
         scope.launch {
-            val archivePrefs = context.getSharedPreferences("manual_archive", Context.MODE_PRIVATE)
-            val unarchivePrefs = context.getSharedPreferences("manual_unarchive", Context.MODE_PRIVATE)
+            val currentArchived = getManualArchive(context)
+            val currentUnarchived = getManualUnarchive(context)
             
-            val currentArchived = archivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
-            val currentUnarchived = unarchivePrefs.getStringSet("ids", emptySet()) ?: emptySet()
-            
-            archivePrefs.edit { putStringSet("ids", currentArchived - threadIds.toSet()) }
-            unarchivePrefs.edit { putStringSet("ids", currentUnarchived + threadIds.toSet()) }
+            saveManualArchive(context, currentArchived - threadIds.toSet())
+            saveManualUnarchive(context, currentUnarchived + threadIds.toSet())
 
             threadIds.forEach { threadId ->
                 markThreadArchived(context, threadId, false)
@@ -1722,7 +1712,6 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
 fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val packageName = context.packageName
-    val prefs = remember { context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE) }
     
     var isDefaultSmsApp by remember {
         mutableStateOf(Telephony.Sms.getDefaultSmsPackage(context) == packageName)
@@ -1753,8 +1742,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
     }
 
     val keywords = remember { 
-        val saved = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
-        mutableStateListOf<String>().apply { addAll(saved) }
+        mutableStateListOf<String>().apply { addAll(getBlockerKeywords(context)) }
     }
     var newKeyword by rememberSaveable { mutableStateOf("") }
 
@@ -1837,7 +1825,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
                     onClick = {
                         if (newKeyword.isNotBlank() && !keywords.contains(newKeyword)) {
                             keywords.add(newKeyword)
-                            prefs.edit { putStringSet("keywords", keywords.toSet()) }
+                            saveBlockerKeywords(context, keywords.toSet())
                             newKeyword = ""
                         }
                     },
@@ -1863,7 +1851,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
                                 contentDescription = "Remove",
                                 modifier = Modifier.clickable {
                                     keywords.remove(keyword)
-                                    prefs.edit { putStringSet("keywords", keywords.toSet()) }
+                                    saveBlockerKeywords(context, keywords.toSet())
                                 }.padding(4.dp)
                             )
                         },
@@ -2632,9 +2620,8 @@ private suspend fun blockNumber(context: Context, number: String) = withContext(
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     
     // Always track in local manual list
-    val manualPrefs = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
-    val current = manualPrefs.getStringSet("addresses", emptySet()) ?: emptySet()
-    manualPrefs.edit { putStringSet("addresses", current + number) }
+    val current = getManualSpam(context)
+    saveManualSpam(context, current + number)
 
     if (!isDefault) {
         withContext(Dispatchers.Main) {
@@ -2658,9 +2645,8 @@ private suspend fun blockNumber(context: Context, number: String) = withContext(
 
 private suspend fun unblockNumber(context: Context, number: String) = withContext(Dispatchers.IO) {
     // Remove from local manual list
-    val manualPrefs = context.getSharedPreferences("manual_spam", Context.MODE_PRIVATE)
-    val current = manualPrefs.getStringSet("addresses", emptySet()) ?: emptySet()
-    manualPrefs.edit { putStringSet("addresses", current - number) }
+    val current = getManualSpam(context)
+    saveManualSpam(context, current - number)
 
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     if (!isDefault) return@withContext

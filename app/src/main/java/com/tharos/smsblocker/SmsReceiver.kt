@@ -6,11 +6,9 @@ import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.provider.BlockedNumberContract
 import android.provider.Telephony
 import android.util.Log
-import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
@@ -41,8 +39,7 @@ class SmsReceiver : BroadcastReceiver() {
             
             Log.d("SmsReceiver", "Intercepted SMS from $sender: $body")
             
-            val prefs = context.getSharedPreferences("blocker_prefs", Context.MODE_PRIVATE)
-            val keywords = prefs.getStringSet("keywords", setOf("Stop2End")) ?: setOf("Stop2End")
+            val keywords = getBlockerKeywords(context)
             val isSpam = keywords.any { body.contains(it, ignoreCase = true) }
 
             if (isSpam) {
@@ -54,7 +51,7 @@ class SmsReceiver : BroadcastReceiver() {
                 }
                 
                 // Notify the user that a message was blocked so they can find it in the spam folder
-                showBlockedNotification(context, sender, body)
+                showBlockedNotification(context, sender)
             } else {
                 if (isDefaultApp) {
                     // If we are the default app and it's NOT spam, 
@@ -67,7 +64,7 @@ class SmsReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun showBlockedNotification(context: Context, sender: String, body: String) {
+    private fun showBlockedNotification(context: Context, sender: String) {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             putExtra("open_spam", true)
