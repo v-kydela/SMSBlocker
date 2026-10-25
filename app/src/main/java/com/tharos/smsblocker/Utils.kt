@@ -3,7 +3,14 @@ package com.tharos.smsblocker
 import android.content.Context
 import androidx.core.content.edit
 
-val DEFAULT_KEYWORDS = setOf("Stop2End")
+val DEFAULT_KEYWORDS = setOf(
+    "Stop2end",
+    "Stop to end",
+    "Stop to quit",
+    "End2end",
+    "End to end",
+)
+
 private const val PREFS_BLOCKER = "blocker_prefs"
 private const val KEY_KEYWORDS = "keywords"
 
