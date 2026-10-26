@@ -54,6 +54,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -74,6 +76,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -1712,7 +1716,12 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
 fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val packageName = context.packageName
+    val scope = rememberCoroutineScope()
     
+    var isScanning by remember { mutableStateOf(false) }
+    var showReportDialog by remember { mutableStateOf(false) }
+    var scanReport by remember { mutableStateOf<ScanReportResult?>(null) }
+
     var isDefaultSmsApp by remember {
         mutableStateOf(Telephony.Sms.getDefaultSmsPackage(context) == packageName)
     }
@@ -1862,11 +1871,110 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Button(
+                onClick = {
+                    isScanning = true
+                    scope.launch {
+                        val result = scanAndApplyBlockingRules(context)
+                        scanReport = result
+                        isScanning = false
+                        showReportDialog = true
+                    }
+                },
+                enabled = !isScanning && keywords.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (isScanning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Scanning messages...")
+                } else {
+                    Icon(Icons.Default.Search, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Apply Rules to Existing Messages")
+                }
+            }
+
             Spacer(modifier = Modifier.height(32.dp))
             Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
                 Text("Back to Messages")
             }
         }
+    }
+
+    if (showReportDialog && scanReport != null) {
+        val report = scanReport!!
+        AlertDialog(
+            onDismissRequest = { showReportDialog = false },
+            title = {
+                Text("Scan & Apply Report")
+            },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        text = "Scanned ${report.totalMessagesScanned} message(s) across ${report.totalThreadsScanned} conversation(s).",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    if (report.matchedThreadsCount == 0) {
+                        Text(
+                            text = "No conversations matched any of the current blocking keywords.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Text(
+                            text = "Found ${report.matchedThreadsCount} conversation(s) containing keyword(s) and moved them to Spam:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        report.matchedDetails.forEach { item ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        text = "Sender: ${item.address}",
+                                        fontWeight = FontWeight.SemiBold,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        text = "Matched keyword: \"${item.matchedKeyword}\"",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "\"${item.snippet}\"",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showReportDialog = false }) {
+                    Text("OK")
+                }
+            }
+        )
     }
 }
 }
@@ -2706,7 +2814,126 @@ private suspend fun markThreadArchived(context: Context, threadId: String, archi
     contentResolver.notifyChange("content://mms-sms/conversations/".toUri(), null)
 }
 
-private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam: Boolean) = withContext(Dispatchers.IO) {
+private data class MatchedThreadDetail(
+    val threadId: String,
+    val address: String,
+    val matchedKeyword: String,
+    val snippet: String
+)
+
+private data class ScanReportResult(
+    val totalMessagesScanned: Int,
+    val totalThreadsScanned: Int,
+    val matchedThreadsCount: Int,
+    val matchedDetails: List<MatchedThreadDetail>
+)
+
+private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResult = withContext(Dispatchers.IO) {
+    val keywords = getBlockerKeywords(context)
+    if (keywords.isEmpty()) {
+        return@withContext ScanReportResult(0, 0, 0, emptyList())
+    }
+
+    val contentResolver = context.contentResolver
+    var totalMessagesScanned = 0
+    val threadIdsSeen = mutableSetOf<String>()
+    val matchedThreadMap = mutableMapOf<String, MatchedThreadDetail>()
+
+    // 1. Scan SMS messages
+    try {
+        val smsUri = Telephony.Sms.CONTENT_URI
+        val projection = arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY)
+        
+        contentResolver.query(smsUri, projection, null, null, null)?.use { cursor ->
+            val threadIdIdx = cursor.getColumnIndex(Telephony.Sms.THREAD_ID)
+            val addressIdx = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
+            val bodyIdx = cursor.getColumnIndex(Telephony.Sms.BODY)
+
+            if (threadIdIdx == -1) return@use
+
+            while (cursor.moveToNext()) {
+                totalMessagesScanned++
+                val threadId = cursor.getString(threadIdIdx) ?: continue
+                val address = if (addressIdx != -1) cursor.getString(addressIdx) ?: "Unknown" else "Unknown"
+                val body = if (bodyIdx != -1) cursor.getString(bodyIdx) ?: "" else ""
+
+                threadIdsSeen.add(threadId)
+
+                if (!matchedThreadMap.containsKey(threadId)) {
+                    val matchedKeyword = keywords.find { body.contains(it, ignoreCase = true) }
+                    if (matchedKeyword != null) {
+                        matchedThreadMap[threadId] = MatchedThreadDetail(
+                            threadId = threadId,
+                            address = address,
+                            matchedKeyword = matchedKeyword,
+                            snippet = if (body.length > 80) body.take(80) + "..." else body
+                        )
+                    }
+                }
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Error scanning SMS messages", e)
+    }
+
+    // 2. Scan conversation snippets
+    try {
+        val conversationsUri = "content://mms-sms/conversations?simple=true".toUri()
+        val projection = arrayOf("_id", "snippet", "recipient_ids")
+        contentResolver.query(conversationsUri, projection, null, null, null)?.use { cursor ->
+            val idIdx = cursor.getColumnIndex("_id")
+            val snippetIdx = cursor.getColumnIndex("snippet")
+            val recipientIdsIdx = cursor.getColumnIndex("recipient_ids")
+
+            if (idIdx == -1) return@use
+
+            while (cursor.moveToNext()) {
+                val threadId = cursor.getString(idIdx) ?: continue
+                val snippet = if (snippetIdx != -1) cursor.getString(snippetIdx) ?: "" else ""
+                val recipientIds = if (recipientIdsIdx != -1) cursor.getString(recipientIdsIdx) ?: "" else ""
+
+                threadIdsSeen.add(threadId)
+
+                if (!matchedThreadMap.containsKey(threadId) && snippet.isNotBlank()) {
+                    val matchedKeyword = keywords.find { snippet.contains(it, ignoreCase = true) }
+                    if (matchedKeyword != null) {
+                        matchedThreadMap[threadId] = MatchedThreadDetail(
+                            threadId = threadId,
+                            address = if (recipientIds.isNotBlank()) "Recipient ID $recipientIds" else "Unknown",
+                            matchedKeyword = matchedKeyword,
+                            snippet = if (snippet.length > 80) snippet.take(80) + "..." else snippet
+                        )
+                    }
+                }
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Error scanning conversations", e)
+    }
+
+    // 3. Apply blocking rules to matched threads
+    val matchedList = matchedThreadMap.values.toList()
+    val manualSpamCurrent = getManualSpam(context).toMutableSet()
+
+    for (matched in matchedList) {
+        markThreadAsSpam(context, matched.threadId, true, showToast = false)
+        if (matched.address.isNotBlank() && matched.address != "Unknown" && !matched.address.startsWith("Recipient ID")) {
+            manualSpamCurrent.add(matched.address)
+        }
+    }
+    if (matchedList.isNotEmpty()) {
+        saveManualSpam(context, manualSpamCurrent)
+    }
+
+    ScanReportResult(
+        totalMessagesScanned = totalMessagesScanned,
+        totalThreadsScanned = threadIdsSeen.size,
+        matchedThreadsCount = matchedList.size,
+        matchedDetails = matchedList
+    )
+}
+
+private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam: Boolean, showToast: Boolean = true) = withContext(Dispatchers.IO) {
     val prefs = context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE)
     prefs.edit {
         if (isSpam) {
@@ -2717,7 +2944,7 @@ private suspend fun markThreadAsSpam(context: Context, threadId: String, isSpam:
     }
 
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
-    if (!isDefault) {
+    if (!isDefault && showToast) {
         withContext(Dispatchers.Main) {
             Toast.makeText(context, "Please set SMS Blocker as default to mark as spam", Toast.LENGTH_LONG).show()
         }
