@@ -320,9 +320,9 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
         }
     }
 
-    // Refresh threads whenever we are on the threads screen OR the database changes
-    LaunchedEffect(hasRequiredPermissions, currentScreen, refreshTrigger) {
-        if (hasRequiredPermissions && (currentScreen == "threads" || currentScreen == "spam" || currentScreen == "archived")) {
+    // Refresh threads whenever permissions or the database changes
+    LaunchedEffect(hasRequiredPermissions, refreshTrigger) {
+        if (hasRequiredPermissions) {
             if (threads.isEmpty()) isLoading = true
 
             withContext(Dispatchers.IO) {
