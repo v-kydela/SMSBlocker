@@ -40,7 +40,7 @@ class SmsReceiver : BroadcastReceiver() {
             Log.d("SmsReceiver", "Intercepted SMS from $sender: $body")
             
             val keywords = getBlockerKeywords(context)
-            val isSpam = keywords.any { body.contains(it, ignoreCase = true) }
+            val isSpam = isSpamByKeyword(body, keywords)
 
             if (isSpam) {
                 Log.d("SmsReceiver", "Spam keyword detected! Saving to spam folder.")

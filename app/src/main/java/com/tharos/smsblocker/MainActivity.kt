@@ -353,7 +353,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
             
             // Apply filtering logic
             val baseWithStatus = baseThreads.map { t ->
-                val isKeywordSpam = keywords.any { t.snippet.contains(it, ignoreCase = true) }
+                val isKeywordSpam = isSpamByKeyword(t.snippet, keywords)
                 val isManualSpam = manualSpam.contains(t.address)
                 val isForcedArchived = manualArchive.contains(t.threadId)
                 val isForcedUnarchived = manualUnarchive.contains(t.threadId)
@@ -2860,7 +2860,7 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
                 threadIdsSeen.add(threadId)
 
                 if (!matchedThreadMap.containsKey(threadId)) {
-                    val matchedKeyword = keywords.find { body.contains(it, ignoreCase = true) }
+                    val matchedKeyword = findSpamKeyword(body, keywords)
                     if (matchedKeyword != null) {
                         matchedThreadMap[threadId] = MatchedThreadDetail(
                             threadId = threadId,
@@ -2895,7 +2895,7 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
                 threadIdsSeen.add(threadId)
 
                 if (!matchedThreadMap.containsKey(threadId) && snippet.isNotBlank()) {
-                    val matchedKeyword = keywords.find { snippet.contains(it, ignoreCase = true) }
+                    val matchedKeyword = findSpamKeyword(snippet, keywords)
                     if (matchedKeyword != null) {
                         matchedThreadMap[threadId] = MatchedThreadDetail(
                             threadId = threadId,

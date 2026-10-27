@@ -65,6 +65,22 @@ fun getManualUnarchive(context: Context): Set<String> =
 fun saveManualUnarchive(context: Context, ids: Set<String>) =
     saveStringSetPref(context, PREFS_MANUAL_UNARCHIVE, KEY_IDS, ids)
 
+fun isKeywordAtEnd(text: String, keyword: String): Boolean {
+    if (text.isBlank() || keyword.isBlank()) return false
+    val cleanedText = text.trimEnd { it.isWhitespace() || it in ".,!?:;" }
+    val cleanedKeyword = keyword.trim()
+    return cleanedText.endsWith(cleanedKeyword, ignoreCase = true)
+}
+
+fun findSpamKeyword(text: String, keywords: Set<String>): String? {
+    if (text.isBlank() || keywords.isEmpty()) return null
+    return keywords.find { isKeywordAtEnd(text, it) }
+}
+
+fun isSpamByKeyword(text: String, keywords: Set<String>): Boolean {
+    return findSpamKeyword(text, keywords) != null
+}
+
 fun extractOtp(body: String): String? {
     // Pattern: Look for 4 to 8 consecutive digits
     val otpPattern = Regex("\\b\\d{4,8}\\b")
