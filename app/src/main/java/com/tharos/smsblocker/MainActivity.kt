@@ -354,19 +354,22 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
             // Apply filtering logic
             val baseWithStatus = baseThreads.map { t ->
                 val isKeywordSpam = isSpamByKeyword(t.snippet, keywords)
-                val isManualSpam = manualSpam.contains(t.address)
+                val normalizedAddress = t.address.replace(Regex("[^0-9+]"), "")
+                val isManualSpam = manualSpam.contains(t.address) || 
+                    (normalizedAddress.isNotEmpty() && manualSpam.any { it.replace(Regex("[^0-9+]"), "") == normalizedAddress })
+                val isRecordedSpam = spamTimestampPrefs.contains(t.threadId)
                 val isForcedArchived = manualArchive.contains(t.threadId)
                 val isForcedUnarchived = manualUnarchive.contains(t.threadId)
                 
                 // Trust manual list as override, then fallback to DB status
                 // Note: thread.isSpam from fetchThreadsFast is based on 'archived' or 'type'
-                // We will now treat 'archived' as ARCHIVED, and keywords/manual list as SPAM.
+                // We will now treat 'archived' as ARCHIVED, and keywords/manual list/recorded spam as SPAM.
                 val resolvedArchived = if (isForcedArchived) true 
                                      else if (isForcedUnarchived) false 
                                      else t.isArchived
 
                 t.copy(
-                    isSpam = t.isSpam || isKeywordSpam || isManualSpam,
+                    isSpam = t.isSpam || isKeywordSpam || isManualSpam || isRecordedSpam,
                     isArchived = resolvedArchived
                 )
             }
@@ -385,7 +388,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                         new.copy(
                             snippet = new.snippet.ifBlank { existing.snippet },
                             contactName = new.contactName ?: existing.contactName,
-                            isSpam = if (isSameVersion) existing.isSpam else new.isSpam,
+                            isSpam = existing.isSpam || new.isSpam,
                             isArchived = if (isSameVersion) existing.isArchived else new.isArchived
                         )
                     } else {
@@ -411,7 +414,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                     val existing = threads.find { it.threadId == updated.threadId }
                     if (existing != null && abs(updated.date - existing.date) < 5000) {
                         updated.copy(
-                            isSpam = existing.isSpam,
+                            isSpam = existing.isSpam || updated.isSpam,
                             isArchived = existing.isArchived
                         )
                     } else {
@@ -2923,6 +2926,7 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
     }
     if (matchedList.isNotEmpty()) {
         saveManualSpam(context, manualSpamCurrent)
+        context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE).edit().clear().apply()
     }
 
     ScanReportResult(
