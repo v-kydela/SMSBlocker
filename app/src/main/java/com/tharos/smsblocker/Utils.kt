@@ -65,9 +65,12 @@ fun getManualUnarchive(context: Context): Set<String> =
 fun saveManualUnarchive(context: Context, ids: Set<String>) =
     saveStringSetPref(context, PREFS_MANUAL_UNARCHIVE, KEY_IDS, ids)
 
+private fun isPunctuationOrSpace(c: Char): Boolean =
+    c.isWhitespace() || c == '.' || c == ',' || c == '!' || c == '?' || c == ':' || c == ';'
+
 fun isKeywordAtEnd(text: String, keyword: String): Boolean {
     if (text.isBlank() || keyword.isBlank()) return false
-    val cleanedText = text.trimEnd { it.isWhitespace() || it in ".,!?:;" }
+    val cleanedText = text.trimEnd(::isPunctuationOrSpace)
     val cleanedKeyword = keyword.trim()
     return cleanedText.endsWith(cleanedKeyword, ignoreCase = true)
 }

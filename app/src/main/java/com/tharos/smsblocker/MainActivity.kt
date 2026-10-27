@@ -324,114 +324,121 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
     LaunchedEffect(hasRequiredPermissions, currentScreen, refreshTrigger) {
         if (hasRequiredPermissions && (currentScreen == "threads" || currentScreen == "spam" || currentScreen == "archived")) {
             if (threads.isEmpty()) isLoading = true
-            
-            val keywords = getBlockerKeywords(context)
-            val manualSpam = getManualSpam(context)
-            val manualArchive = getManualArchive(context)
-            val manualUnarchive = getManualUnarchive(context)
 
-            // Phase 0: Ultra-fast check for new messages
-            // Querying only the SMS table is significantly faster than the joined conversation view
-            val latestUpdates = fetchLatestThreadTimestamps(context)
-            if (latestUpdates.isNotEmpty()) {
-                val hasNewer = latestUpdates.any { (tid, date) ->
-                    val existing = threads.find { it.threadId == tid }
-                    existing == null || date > existing.date + 1000
-                }
-                if (hasNewer) {
-                    // Update dates in current list immediately to bring new threads to top
-                    threads = threads.map { t ->
-                        val newDate = latestUpdates[t.threadId]
-                        if (newDate != null && newDate > t.date) t.copy(date = newDate, read = false) else t
-                    }.sortedByDescending { it.date }
-                }
-            }
+            withContext(Dispatchers.IO) {
+                val keywords = getBlockerKeywords(context)
+                val manualSpam = getManualSpam(context)
+                val normalizedManualSpam = manualSpam.map { it.replace(Regex("[^0-9+]"), "") }
+                    .filter { it.isNotEmpty() }
+                    .toSet()
+                val manualArchive = getManualArchive(context)
+                val manualUnarchive = getManualUnarchive(context)
+                val recordedSpam = spamTimestampPrefs.all.keys
 
-            // Phase 1: Fast Fetch (Basic thread info, snippets, and addresses)
-            // This returns almost instantly from the conversation view.
-            val baseThreads = fetchThreadsFast(context, contactCache)
-            
-            // Apply filtering logic
-            val baseWithStatus = baseThreads.map { t ->
-                val isKeywordSpam = isSpamByKeyword(t.snippet, keywords)
-                val normalizedAddress = t.address.replace(Regex("[^0-9+]"), "")
-                val isManualSpam = manualSpam.contains(t.address) || 
-                    (normalizedAddress.isNotEmpty() && manualSpam.any { it.replace(Regex("[^0-9+]"), "") == normalizedAddress })
-                val isRecordedSpam = spamTimestampPrefs.contains(t.threadId)
-                val isForcedArchived = manualArchive.contains(t.threadId)
-                val isForcedUnarchived = manualUnarchive.contains(t.threadId)
-                
-                // Trust manual list as override, then fallback to DB status
-                // Note: thread.isSpam from fetchThreadsFast is based on 'archived' or 'type'
-                // We will now treat 'archived' as ARCHIVED, and keywords/manual list/recorded spam as SPAM.
-                val resolvedArchived = if (isForcedArchived) true 
-                                     else if (isForcedUnarchived) false 
-                                     else t.isArchived
-
-                t.copy(
-                    isSpam = t.isSpam || isKeywordSpam || isManualSpam || isRecordedSpam,
-                    isArchived = resolvedArchived
-                )
-            }
-            
-            val filteredBase = baseWithStatus.filter { it.threadId !in pendingDeletions }
-            
-            threads = if (threads.isEmpty()) {
-                filteredBase
-            } else {
-                filteredBase.map { new ->
-                    val existing = threads.find { it.threadId == new.threadId }
-                    if (existing != null) {
-                        // PRESERVE local spam/archive status if no new messages arrived (avoids stale DB overwrite)
-                        // Using a slightly larger window (5s) for better stability across reloads
-                        val isSameVersion = abs(new.date - existing.date) < 5000
-                        new.copy(
-                            snippet = new.snippet.ifBlank { existing.snippet },
-                            contactName = new.contactName ?: existing.contactName,
-                            isSpam = existing.isSpam || new.isSpam,
-                            isArchived = if (isSameVersion) existing.isArchived else new.isArchived
-                        )
-                    } else {
-                        new
+                // Phase 0: Ultra-fast check for new messages
+                val latestUpdates = fetchLatestThreadTimestamps(context)
+                if (latestUpdates.isNotEmpty()) {
+                    val hasNewer = latestUpdates.any { (tid, date) ->
+                        val existing = threads.find { it.threadId == tid }
+                        existing == null || date > existing.date + 1000
+                    }
+                    if (hasNewer) {
+                        withContext(Dispatchers.Main) {
+                            threads = threads.map { t ->
+                                val newDate = latestUpdates[t.threadId]
+                                if (newDate != null && newDate > t.date) t.copy(date = newDate, read = false) else t
+                            }.sortedByDescending { it.date }
+                        }
                     }
                 }
-            }
-            isLoading = false
-            saveThreadsToCache(context, threads)
-            
-            // Phase 2: Background Deep Sync (Resolving missing snippets + Contact Names)
-            launch {
-                val updatedWithSnippets = resolveMissingSnippets(context, threads)
-                // Filter again: if snippet is STILL blank after deep sync, it's likely empty
+
+                // Phase 1: Fast Fetch
+                val baseThreads = fetchThreadsFast(context, contactCache)
+                
+                // Apply filtering logic
+                val baseWithStatus = baseThreads.map { t ->
+                    val isKeywordSpam = isSpamByKeyword(t.snippet, keywords)
+                    val normalizedAddress = t.address.replace(Regex("[^0-9+]"), "")
+                    val isManualSpam = manualSpam.contains(t.address) || 
+                        (normalizedAddress.isNotEmpty() && normalizedAddress in normalizedManualSpam)
+                    val isRecordedSpam = t.threadId in recordedSpam
+                    val isForcedArchived = t.threadId in manualArchive
+                    val isForcedUnarchived = t.threadId in manualUnarchive
+                    
+                    // Trust manual list as override, then fallback to DB status
+                    // Note: thread.isSpam from fetchThreadsFast is based on 'archived' or 'type'
+                    // We will now treat 'archived' as ARCHIVED, and keywords/manual list/recorded spam as SPAM.
+                    val resolvedArchived = if (isForcedArchived) true 
+                                         else if (isForcedUnarchived) false 
+                                         else t.isArchived
+
+                    t.copy(
+                        isSpam = t.isSpam || isKeywordSpam || isManualSpam || isRecordedSpam,
+                        isArchived = resolvedArchived
+                    )
+                }
+                
+                val filteredBase = baseWithStatus.filter { it.threadId !in pendingDeletions }
+                
+                val mergedThreads = if (threads.isEmpty()) {
+                    filteredBase
+                } else {
+                    filteredBase.map { new ->
+                        val existing = threads.find { it.threadId == new.threadId }
+                        if (existing != null) {
+                            val isSameVersion = abs(new.date - existing.date) < 5000
+                            new.copy(
+                                snippet = new.snippet.ifBlank { existing.snippet },
+                                contactName = new.contactName ?: existing.contactName,
+                                isSpam = existing.isSpam || new.isSpam,
+                                isArchived = if (isSameVersion) existing.isArchived else new.isArchived
+                            )
+                        } else {
+                            new
+                        }
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    threads = mergedThreads
+                    isLoading = false
+                }
+                saveThreadsToCache(context, mergedThreads)
+                
+                // Phase 2: Background Deep Sync
+                val updatedWithSnippets = resolveMissingSnippets(context, mergedThreads)
                 val finalFiltered = updatedWithSnippets.filter { 
                     (it.snippet.isNotBlank() || it.date > 0) && it.threadId !in pendingDeletions 
                 }
                 
                 val finalThreads = resolveThreadDetails(context, finalFiltered)
                 
-                // Final merge with Phase 2 results
-                threads = finalThreads.map { updated ->
-                    val existing = threads.find { it.threadId == updated.threadId }
+                val syncedThreads = finalThreads.map { updated ->
+                    val existing = mergedThreads.find { it.threadId == updated.threadId }
                     if (existing != null && abs(updated.date - existing.date) < 5000) {
                         updated.copy(
                             isSpam = existing.isSpam || updated.isSpam,
                             isArchived = existing.isArchived
                         )
                     } else {
-                        val isForcedArchived = manualArchive.contains(updated.threadId)
-                        val isForcedUnarchived = manualUnarchive.contains(updated.threadId)
+                        val isForcedArchived = updated.threadId in manualArchive
+                        val isForcedUnarchived = updated.threadId in manualUnarchive
                         updated.copy(
                             isSpam = updated.isSpam,
                             isArchived = if (isForcedArchived) true else if (isForcedUnarchived) false else updated.isArchived
                         )
                     }
                 }
-                
+
+                withContext(Dispatchers.Main) {
+                    threads = syncedThreads
+                }
+
                 // Track when threads enter spam and auto-delete after 7 days
                 val now = System.currentTimeMillis()
                 val sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000)
                 spamTimestampPrefs.edit {
-                    threads.forEach { thread ->
+                    syncedThreads.forEach { thread ->
                         if (thread.isSpam) {
                             if (!spamTimestampPrefs.contains(thread.threadId)) putLong(thread.threadId, now)
                         } else {
@@ -441,7 +448,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                 }
                 
                 val timestamps = spamTimestampPrefs.all
-                threads.filter { it.isSpam }.forEach { thread ->
+                syncedThreads.filter { it.isSpam }.forEach { thread ->
                     val addedAt = timestamps[thread.threadId] as? Long ?: 0L
                     if (addedAt in 1..<sevenDaysAgo) {
                         deleteThread(context, thread.threadId)
@@ -452,7 +459,9 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                 val stillInProvider = baseThreads.map { it.threadId }.toSet()
                 val newlyCleaned = pendingDeletions.intersect(stillInProvider)
                 if (newlyCleaned != pendingDeletions) {
-                    pendingDeletions = newlyCleaned
+                    withContext(Dispatchers.Main) {
+                        pendingDeletions = newlyCleaned
+                    }
                     deletionPrefs.edit { putStringSet("ids", newlyCleaned) }
                 }
                 
