@@ -2837,6 +2837,19 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
         return@withContext ScanReportResult(0, 0, 0, emptyList())
     }
 
+    val spamTimestampPrefs = context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE)
+    val existingSpamThreadIds = spamTimestampPrefs.all.keys.toSet()
+    val manualSpamAddresses = getManualSpam(context)
+    val normalizedManualSpam = manualSpamAddresses.map { it.replace(Regex("[^0-9+]"), "") }.filter { it.isNotEmpty() }.toSet()
+
+    fun isAlreadySpam(threadId: String, address: String): Boolean {
+        if (threadId in existingSpamThreadIds) return true
+        if (address in manualSpamAddresses) return true
+        val norm = address.replace(Regex("[^0-9+]"), "")
+        if (norm.isNotEmpty() && norm in normalizedManualSpam) return true
+        return false
+    }
+
     val contentResolver = context.contentResolver
     var totalMessagesScanned = 0
     val threadIdsSeen = mutableSetOf<String>()
@@ -2855,9 +2868,12 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
             if (threadIdIdx == -1) return@use
 
             while (cursor.moveToNext()) {
-                totalMessagesScanned++
                 val threadId = cursor.getString(threadIdIdx) ?: continue
                 val address = if (addressIdx != -1) cursor.getString(addressIdx) ?: "Unknown" else "Unknown"
+
+                if (isAlreadySpam(threadId, address)) continue
+
+                totalMessagesScanned++
                 val body = if (bodyIdx != -1) cursor.getString(bodyIdx) ?: "" else ""
 
                 threadIdsSeen.add(threadId)
@@ -2882,19 +2898,26 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
     // 2. Scan conversation snippets
     try {
         val conversationsUri = "content://mms-sms/conversations?simple=true".toUri()
-        val projection = arrayOf("_id", "snippet", "recipient_ids")
+        val projection = arrayOf("_id", "snippet", "recipient_ids", "type")
         contentResolver.query(conversationsUri, projection, null, null, null)?.use { cursor ->
             val idIdx = cursor.getColumnIndex("_id")
             val snippetIdx = cursor.getColumnIndex("snippet")
             val recipientIdsIdx = cursor.getColumnIndex("recipient_ids")
+            val typeIdx = cursor.getColumnIndex("type")
 
             if (idIdx == -1) return@use
 
             while (cursor.moveToNext()) {
                 val threadId = cursor.getString(idIdx) ?: continue
-                val snippet = if (snippetIdx != -1) cursor.getString(snippetIdx) ?: "" else ""
                 val recipientIds = if (recipientIdsIdx != -1) cursor.getString(recipientIdsIdx) ?: "" else ""
+                val address = if (recipientIds.isNotBlank()) "Recipient ID $recipientIds" else "Unknown"
 
+                val type = if (typeIdx != -1) cursor.getInt(typeIdx) else 0
+                val isDbSpam = type == 4
+
+                if (isDbSpam || isAlreadySpam(threadId, address)) continue
+
+                val snippet = if (snippetIdx != -1) cursor.getString(snippetIdx) ?: "" else ""
                 threadIdsSeen.add(threadId)
 
                 if (!matchedThreadMap.containsKey(threadId) && snippet.isNotBlank()) {
@@ -2902,7 +2925,7 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
                     if (matchedKeyword != null) {
                         matchedThreadMap[threadId] = MatchedThreadDetail(
                             threadId = threadId,
-                            address = if (recipientIds.isNotBlank()) "Recipient ID $recipientIds" else "Unknown",
+                            address = address,
                             matchedKeyword = matchedKeyword,
                             snippet = if (snippet.length > 80) snippet.take(80) + "..." else snippet
                         )
