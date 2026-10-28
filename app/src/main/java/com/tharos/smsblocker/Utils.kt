@@ -99,6 +99,11 @@ fun reportSpamToCarrier(context: Context, senderNumber: String, messageBody: Str
     }
 }
 
+fun is7726Shortcode(sender: String): Boolean {
+    val digits = sender.replace(Regex("[^0-9]"), "")
+    return digits == "7726" || sender.equals("7726", ignoreCase = true)
+}
+
 private fun isPunctuationOrSpace(c: Char): Boolean =
     c.isWhitespace() || c == '.' || c == ',' || c == '!' || c == '?' || c == ':' || c == ';'
 

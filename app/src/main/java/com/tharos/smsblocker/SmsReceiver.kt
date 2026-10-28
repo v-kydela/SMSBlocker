@@ -58,8 +58,12 @@ class SmsReceiver : BroadcastReceiver() {
                     // we MUST manually save it to the system provider as a single combined message.
                     saveToTelephony(context, firstMessage.originatingAddress ?: sender, body, timestamp, isSpam = false)
                 }
-                // Notify the user about the new legitimate message
-                showNotification(context, sender, body)
+                // Suppress push notification for carrier 7726 spam report confirmation SMS
+                if (is7726Shortcode(sender)) {
+                    Log.d("SmsReceiver", "Suppressed push notification for 7726 carrier response")
+                } else {
+                    showNotification(context, sender, body)
+                }
             }
         }
     }
