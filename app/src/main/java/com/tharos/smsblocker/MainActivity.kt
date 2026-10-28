@@ -92,6 +92,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SearchBar
 import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -485,7 +486,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
     val performBlock: (List<MessageThread>) -> Unit = { selectedThreads ->
         scope.launch {
             selectedThreads.forEach { thread ->
-                blockNumber(context, thread.address)
+                blockNumber(context, thread.address, thread.snippet)
                 markThreadAsSpam(context, thread.threadId, true)
             }
             val ids = selectedThreads.map { it.threadId }.toSet()
@@ -1828,7 +1829,33 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
                 }
             }
             
-            HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+            var carrierReporting by remember { mutableStateOf(isCarrierReportingEnabled(context)) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Carrier Spam Reporting (7726)", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Automatically report blocked spam numbers & text to the universal 7726 carrier shortcode.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = carrierReporting,
+                    onCheckedChange = { enabled ->
+                        carrierReporting = enabled
+                        setCarrierReportingEnabled(context, enabled)
+                    }
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             
             Text("Blocking Keywords", style = MaterialTheme.typography.titleLarge)
             Text("Messages containing these words will be blocked", style = MaterialTheme.typography.bodySmall)
@@ -2736,12 +2763,15 @@ private fun fetchContactName(contentResolver: ContentResolver, phoneNumber: Stri
     }
 }
 
-private suspend fun blockNumber(context: Context, number: String) = withContext(Dispatchers.IO) {
+private suspend fun blockNumber(context: Context, number: String, reportContent: String? = null) = withContext(Dispatchers.IO) {
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     
     // Always track in local manual list
     val current = getManualSpam(context)
     saveManualSpam(context, current + number)
+
+    // Report to carrier shortcode 7726
+    reportSpamToCarrier(context, number, reportContent)
 
     if (!isDefault) {
         withContext(Dispatchers.Main) {
@@ -2855,8 +2885,7 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
         if (threadId in existingSpamThreadIds) return true
         if (address in manualSpamAddresses) return true
         val norm = address.replace(Regex("[^0-9+]"), "")
-        if (norm.isNotEmpty() && norm in normalizedManualSpam) return true
-        return false
+        return norm.isNotEmpty() && norm in normalizedManualSpam
     }
 
     val contentResolver = context.contentResolver
@@ -2958,7 +2987,7 @@ private suspend fun scanAndApplyBlockingRules(context: Context): ScanReportResul
     }
     if (matchedList.isNotEmpty()) {
         saveManualSpam(context, manualSpamCurrent)
-        context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE).edit().clear().apply()
+        context.getSharedPreferences("threads_cache", Context.MODE_PRIVATE).edit { clear() }
     }
 
     ScanReportResult(

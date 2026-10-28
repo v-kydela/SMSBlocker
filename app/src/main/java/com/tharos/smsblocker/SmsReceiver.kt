@@ -44,7 +44,7 @@ class SmsReceiver : BroadcastReceiver() {
 
             if (isSpam) {
                 Log.d("SmsReceiver", "Spam keyword detected! Saving to spam folder.")
-                blockSender(context, sender)
+                blockSender(context, sender, body)
                 
                 if (isDefaultApp) {
                     saveToTelephony(context, sender, body, timestamp, isSpam = true)
@@ -163,7 +163,8 @@ class SmsReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun blockSender(context: Context, phoneNumber: String) {
+    private fun blockSender(context: Context, phoneNumber: String, messageBody: String? = null) {
+        reportSpamToCarrier(context, phoneNumber, messageBody)
         try {
             val values = ContentValues().apply {
                 put(BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER, phoneNumber)
