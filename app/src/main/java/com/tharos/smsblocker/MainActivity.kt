@@ -2004,7 +2004,13 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
             )
         }
     ) { p ->
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(p).padding(horizontal = 16.dp, vertical = 0.dp)) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(p)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+        ) {
             item {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text("Blocker Settings", style = MaterialTheme.typography.headlineMedium)
@@ -2162,6 +2168,7 @@ fun SmsBlockerSettingsScreen(onBack: () -> Unit) {
             Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
                 Text("Back to Messages")
             }
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 
