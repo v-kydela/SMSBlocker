@@ -67,7 +67,10 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Unarchive
@@ -833,6 +836,178 @@ fun BlockThreadConfirmationDialog(
     )
 }
 
+private fun openContactDetails(context: Context, address: String, contactName: String) {
+    try {
+        val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(address))
+        val projection = arrayOf(ContactsContract.PhoneLookup._ID, ContactsContract.PhoneLookup.LOOKUP_KEY)
+        var contactUri: Uri? = null
+
+        context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idIdx = cursor.getColumnIndex(ContactsContract.PhoneLookup._ID)
+                val keyIdx = cursor.getColumnIndex(ContactsContract.PhoneLookup.LOOKUP_KEY)
+                if (idIdx != -1 && keyIdx != -1) {
+                    val id = cursor.getLong(idIdx)
+                    val lookupKey = cursor.getString(keyIdx)
+                    contactUri = ContactsContract.Contacts.getLookupUri(id, lookupKey)
+                }
+            }
+        }
+
+        val intent = if (contactUri != null) {
+            Intent(Intent.ACTION_VIEW, contactUri)
+        } else {
+            Intent(Intent.ACTION_INSERT_OR_EDIT).apply {
+                type = ContactsContract.Contacts.CONTENT_ITEM_TYPE
+                putExtra(ContactsContract.Intents.Insert.PHONE, address)
+                if (contactName.isNotBlank() && !contactName.equals(address, ignoreCase = true)) {
+                    putExtra(ContactsContract.Intents.Insert.NAME, contactName)
+                }
+            }
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to open contact details", e)
+        Toast.makeText(context, "Unable to open contacts app", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ConversationDetailsDialog(
+    contactName: String,
+    address: String,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val isKnownContact = contactName.isNotBlank() && !contactName.equals(address, ignoreCase = true)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    modifier = Modifier.size(48.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = (if (isKnownContact) contactName else address).take(1).uppercase(),
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = if (isKnownContact) contactName else "Unknown Contact",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = address,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                // Call Action
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            try {
+                                val intent = Intent(Intent.ACTION_DIAL, "tel:$address".toUri())
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                Log.e("SMSBlocker", "Failed to start dialer", e)
+                            }
+                            onDismiss()
+                        }
+                        .padding(vertical = 12.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Phone,
+                        contentDescription = "Call",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = "Call $address",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+
+                // Copy Number Action
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("Phone Number", address)
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(context, "Phone number copied", Toast.LENGTH_SHORT).show()
+                            onDismiss()
+                        }
+                        .padding(vertical = 12.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        contentDescription = "Copy number",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = "Copy phone number",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+
+                // View / Add Contact Action
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            openContactDetails(context, address, contactName)
+                            onDismiss()
+                        }
+                        .padding(vertical = 12.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Person,
+                        contentDescription = "Contact info",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = if (isKnownContact) "View contact" else "Add to contacts",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ConversationListScreen(
@@ -1404,6 +1579,7 @@ fun ChatScreen(
     var isLoading by remember(currentThreadId) { mutableStateOf(currentThreadId != "-1") }
     var showBlockDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var showDetailsDialog by remember { mutableStateOf(false) }
 
     val actions = remember(view) {
         getConversationActions(view)
@@ -1442,11 +1618,27 @@ fun ChatScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = contactName,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showDetailsDialog = true }
+                    ) {
+                        Text(
+                            text = contactName,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (address.isNotBlank() && !contactName.equals(address, ignoreCase = true)) {
+                            Text(
+                                text = address,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -1458,25 +1650,51 @@ fun ChatScreen(
                     IconButton(onClick = { showMenu = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "More options")
                     }
-                    ThreadActionMenu(
+                    DropdownMenu(
                         expanded = showMenu,
-                        onDismissRequest = { showMenu = false },
-                        actions = actions,
-                        onAction = { type ->
-                            when (type) {
-                                ActionType.DELETE -> showDeleteDialog = true
-                                ActionType.ARCHIVE -> onArchive()
-                                ActionType.UNARCHIVE -> onUnarchive()
-                                ActionType.BLOCK -> showBlockDialog = true
-                                ActionType.UNBLOCK -> onUnblock()
+                        onDismissRequest = { showMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Details & Contact") },
+                            onClick = {
+                                showMenu = false
+                                showDetailsDialog = true
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Default.Info, contentDescription = null)
                             }
+                        )
+                        actions.forEach { action ->
+                            ThreadActionMenuItem(
+                                text = action.label,
+                                icon = action.icon,
+                                iconTint = action.iconTint,
+                                onDismissRequest = { showMenu = false },
+                                onClick = {
+                                    when (action.type) {
+                                        ActionType.DELETE -> showDeleteDialog = true
+                                        ActionType.ARCHIVE -> onArchive()
+                                        ActionType.UNARCHIVE -> onUnarchive()
+                                        ActionType.BLOCK -> showBlockDialog = true
+                                        ActionType.UNBLOCK -> onUnblock()
+                                    }
+                                }
+                            )
                         }
-                    )
+                    }
                 }
             )
         }
     ) { p ->
         Column(modifier = Modifier.fillMaxSize().padding(p)) {
+            if (showDetailsDialog) {
+                ConversationDetailsDialog(
+                    contactName = contactName,
+                    address = address,
+                    onDismiss = { showDetailsDialog = false }
+                )
+            }
+
             if (showBlockDialog) {
                 BlockThreadConfirmationDialog(
                     contactName = contactName,
