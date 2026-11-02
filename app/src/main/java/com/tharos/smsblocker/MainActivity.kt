@@ -251,15 +251,26 @@ class MainActivity : ComponentActivity() {
 
 fun createNotificationChannel(context: Context) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val notificationManager: NotificationManager =
+            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
         val name = "SMS Messages"
         val descriptionText = "Notifications for new SMS messages"
         val importance = NotificationManager.IMPORTANCE_HIGH
         val channel = NotificationChannel("sms_channel", name, importance).apply {
             description = descriptionText
         }
-        val notificationManager: NotificationManager =
-            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val spamName = "Spam Messages"
+        val spamDescriptionText = "Silent notifications for blocked spam messages"
+        val spamImportance = NotificationManager.IMPORTANCE_LOW
+        val spamChannel = NotificationChannel("spam_channel", spamName, spamImportance).apply {
+            description = spamDescriptionText
+            setSound(null, null)
+        }
+
         notificationManager.createNotificationChannel(channel)
+        notificationManager.createNotificationChannel(spamChannel)
     }
 }
 

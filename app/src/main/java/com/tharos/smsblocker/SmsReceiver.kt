@@ -69,6 +69,7 @@ class SmsReceiver : BroadcastReceiver() {
     }
 
     private fun showBlockedNotification(context: Context, sender: String) {
+        createNotificationChannel(context)
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             putExtra("open_spam", true)
@@ -80,11 +81,12 @@ class SmsReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val builder = NotificationCompat.Builder(context, "sms_channel")
+        val builder = NotificationCompat.Builder(context, "spam_channel")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("Spam blocked from $sender")
             .setContentText("Message moved to spam folder.")
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSound(null)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
 
@@ -93,6 +95,7 @@ class SmsReceiver : BroadcastReceiver() {
     }
 
     private fun showNotification(context: Context, sender: String, body: String) {
+        createNotificationChannel(context)
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             putExtra("address", sender)
