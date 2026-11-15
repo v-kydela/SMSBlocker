@@ -276,6 +276,7 @@ fun createNotificationChannel(context: Context) {
 
 @Composable
 fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = false) {
+    val context = LocalContext.current
     var currentScreen by rememberSaveable { mutableStateOf("threads") }
     var returnToScreen by rememberSaveable { mutableStateOf("threads") }
     var selectedThreadId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -291,10 +292,10 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
             selectedAddress = initialAddress
             selectedThreadId = null // Force reload by address
             currentScreen = "chat_by_address"
+            clearNotificationMessages(context, initialAddress)
         }
     }
     
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val hasRequiredPermissions = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED &&
                                 ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
@@ -593,6 +594,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                         onSpamClick = { currentScreen = "spam" },
                         onArchiveClick = { currentScreen = "archived" },
                         onThreadClick = { thread -> 
+                            clearNotificationMessages(context, thread.address)
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
                             selectedAddress = thread.address
@@ -624,6 +626,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                         onSettingsClick = { currentScreen = "settings" },
                         onBack = { currentScreen = "threads" },
                         onThreadClick = { thread -> 
+                            clearNotificationMessages(context, thread.address)
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
                             selectedAddress = thread.address
@@ -645,6 +648,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                         onSettingsClick = { currentScreen = "settings" },
                         onBack = { currentScreen = "threads" },
                         onThreadClick = { thread -> 
+                            clearNotificationMessages(context, thread.address)
                             selectedThreadId = thread.threadId
                             selectedContactName = thread.contactName ?: thread.address
                             selectedAddress = thread.address

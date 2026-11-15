@@ -134,3 +134,76 @@ fun extractOtp(body: String): String? {
         otpPattern.find(body)?.value
     } else null
 }
+
+fun getContactName(context: Context, phoneNumber: String): String {
+    if (phoneNumber.isBlank() || phoneNumber == "Unknown") return phoneNumber
+
+    val normalized = phoneNumber.replace(Regex("[^0-9+]"), "")
+    if (normalized.isNotBlank()) {
+        val cached = context.getSharedPreferences("contact_names", Context.MODE_PRIVATE)
+            .getString(normalized, null)
+        if (!cached.isNullOrBlank()) return cached
+    }
+
+    val uri = android.net.Uri.withAppendedPath(android.provider.ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(phoneNumber))
+    val projection = arrayOf(android.provider.ContactsContract.PhoneLookup.DISPLAY_NAME)
+    try {
+        context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIdx = cursor.getColumnIndex(android.provider.ContactsContract.PhoneLookup.DISPLAY_NAME)
+                if (nameIdx != -1) {
+                    val name = cursor.getString(nameIdx)
+                    if (!name.isNullOrBlank()) return name
+                }
+            }
+        }
+    } catch (e: Exception) {
+        android.util.Log.e("Utils", "Error fetching contact name", e)
+    }
+    return phoneNumber
+}
+
+data class NotifMessage(val timestamp: Long, val body: String)
+
+fun getActiveNotificationMessages(context: Context, sender: String): List<NotifMessage> {
+    val key = sender.replace(Regex("[^0-9+]"), "")
+    if (key.isBlank()) return emptyList()
+    val prefs = context.getSharedPreferences("active_notifications", Context.MODE_PRIVATE)
+    val serialized = prefs.getString(key, null) ?: return emptyList()
+    val now = System.currentTimeMillis()
+    return try {
+        serialized.split("\n\n").mapNotNull { line ->
+            val parts = line.split("||", limit = 2)
+            if (parts.size == 2) {
+                val time = parts[0].toLongOrNull() ?: 0L
+                if (now - time < 3 * 3600 * 1000) {
+                    NotifMessage(time, parts[1])
+                } else null
+            } else null
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+fun addActiveNotificationMessage(context: Context, sender: String, body: String, timestamp: Long): List<NotifMessage> {
+    val key = sender.replace(Regex("[^0-9+]"), "")
+    if (key.isBlank()) return listOf(NotifMessage(timestamp, body))
+    val current = getActiveNotificationMessages(context, sender).toMutableList()
+    current.add(NotifMessage(timestamp, body))
+    val trimmed = if (current.size > 10) current.takeLast(10) else current
+
+    val serialized = trimmed.joinToString("\n\n") { "${it.timestamp}||${it.body}" }
+    context.getSharedPreferences("active_notifications", Context.MODE_PRIVATE).edit {
+        putString(key, serialized)
+    }
+    return trimmed
+}
+
+fun clearNotificationMessages(context: Context, sender: String) {
+    val key = sender.replace(Regex("[^0-9+]"), "")
+    if (key.isBlank()) return
+    context.getSharedPreferences("active_notifications", Context.MODE_PRIVATE).edit {
+        remove(key)
+    }
+}

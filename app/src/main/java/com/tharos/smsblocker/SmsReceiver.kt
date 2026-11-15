@@ -10,6 +10,7 @@ import android.provider.BlockedNumberContract
 import android.provider.Telephony
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.core.content.edit
 import androidx.core.net.toUri
 
@@ -62,7 +63,7 @@ class SmsReceiver : BroadcastReceiver() {
                 if (is7726Shortcode(sender)) {
                     Log.d("SmsReceiver", "Suppressed push notification for 7726 carrier response")
                 } else {
-                    showNotification(context, sender, body)
+                    showNotification(context, sender, body, timestamp)
                 }
             }
         }
@@ -81,21 +82,26 @@ class SmsReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val senderName = getContactName(context, sender)
         val builder = NotificationCompat.Builder(context, "spam_channel")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("Spam blocked from $sender")
-            .setContentText("Message moved to spam folder.")
+            .setContentTitle(senderName)
+            .setContentText("Spam message blocked")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSound(null)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
 
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(sender.hashCode(), builder.build())
+        notificationManager.notify(sender.hashCode() + 1, builder.build())
     }
 
-    private fun showNotification(context: Context, sender: String, body: String) {
+    private fun showNotification(context: Context, sender: String, body: String, timestamp: Long) {
         createNotificationChannel(context)
+
+        val activeMessages = addActiveNotificationMessage(context, sender, body, timestamp)
+        val senderName = getContactName(context, sender)
+
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             putExtra("address", sender)
@@ -107,31 +113,40 @@ class SmsReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val userPerson = Person.Builder().setName("Me").build()
+        val senderPerson = Person.Builder().setName(senderName).build()
+
+        val messagingStyle = NotificationCompat.MessagingStyle(userPerson)
+            .setConversationTitle(null)
+
+        for (msg in activeMessages) {
+            messagingStyle.addMessage(msg.body, msg.timestamp, senderPerson)
+        }
+
         val builder = NotificationCompat.Builder(context, "sms_channel")
             .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentTitle("New message from $sender")
-            .setContentText(body)
+            .setStyle(messagingStyle)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
 
         // Extract OTP and add "Copy" action if found
-        val otpCode = extractOtp(body)
-        if (otpCode != null) {
+        val latestOtpCode = activeMessages.mapNotNull { extractOtp(it.body) }.lastOrNull()
+        if (latestOtpCode != null) {
             val copyIntent = Intent(context, CopyOtpReceiver::class.java).apply {
-                putExtra("otp_code", otpCode)
+                putExtra("otp_code", latestOtpCode)
             }
             val copyPendingIntent = PendingIntent.getBroadcast(
                 context,
-                otpCode.hashCode(),
+                latestOtpCode.hashCode(),
                 copyIntent,
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            builder.addAction(android.R.drawable.ic_menu_edit, "Copy $otpCode", copyPendingIntent)
+            builder.addAction(android.R.drawable.ic_menu_edit, "Copy $latestOtpCode", copyPendingIntent)
         }
 
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
+        notificationManager.notify(sender.hashCode(), builder.build())
     }
 
     private fun saveToTelephony(context: Context, sender: String, body: String, timestamp: Long, isSpam: Boolean) {
