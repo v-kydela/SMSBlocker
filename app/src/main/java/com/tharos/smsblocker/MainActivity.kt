@@ -2713,93 +2713,242 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
     }
 }
 
+private data class ParsedReaction(
+    val emoji: String,
+    val snippet: String,
+    val isRemoval: Boolean
+)
+
+private val REACTION_MAP = mapOf(
+    "liked" to "👍",
+    "like" to "👍",
+    "loved" to "❤️",
+    "love" to "❤️",
+    "heart" to "❤️",
+    "disliked" to "👎",
+    "dislike" to "👎",
+    "laughed at" to "😂",
+    "laughed" to "😂",
+    "laugh" to "😂",
+    "emphasized" to "‼️",
+    "exclamation" to "‼️",
+    "exclamation mark" to "‼️",
+    "questioned" to "❓",
+    "question" to "❓",
+    "question mark" to "❓",
+    "sad" to "😢",
+    "cried" to "😢",
+    "surprised" to "😮",
+    "wowed" to "😮",
+    "gasp" to "😮",
+    "angry" to "😡",
+    "mad" to "😡"
+)
+
+private fun cleanSnippet(raw: String): String {
+    var s = raw.trim()
+    val quoteChars = setOf('“', '”', '"', '\'', '‘', '’', '«', '»', '„')
+    while (s.isNotEmpty() && s.first() in quoteChars) {
+        s = s.substring(1).trim()
+    }
+    while (s.isNotEmpty() && (s.last() in quoteChars || s.last() == '.')) {
+        s = s.substring(0, s.length - 1).trim()
+    }
+    return s
+}
+
+private fun parseReaction(body: String): ParsedReaction? {
+    val text = body.trim()
+    if (text.isBlank()) return null
+
+    // 1. Check Removal Patterns
+    val removalRegex = Regex("^Removed\\s+(?:a\\s+|an\\s+)?(.+?)\\s+(?:from|to)\\s+(.*)$", RegexOption.IGNORE_CASE)
+    val removalMatch = removalRegex.find(text)
+    if (removalMatch != null) {
+        val rawEmojiOrWord = removalMatch.groupValues[1].trim()
+        val rawSnippet = removalMatch.groupValues[2].trim()
+        val emoji = REACTION_MAP[rawEmojiOrWord.lowercase()] ?: rawEmojiOrWord
+        val snippet = cleanSnippet(rawSnippet)
+        if (snippet.isNotBlank()) {
+            return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = true)
+        }
+    }
+
+    // 2. Check "Reacted [with] <emoji/word> to/from <snippet>"
+    val reactedWithEmojiRegex = Regex("^Reacted\\s+(?:with\\s+)?(\\S+)\\s+(?:to|from)\\s+(.*)$", RegexOption.IGNORE_CASE)
+    val reactedMatch = reactedWithEmojiRegex.find(text)
+    if (reactedMatch != null) {
+        val rawEmojiOrWord = reactedMatch.groupValues[1].trim()
+        val rawSnippet = reactedMatch.groupValues[2].trim()
+        val emoji = REACTION_MAP[rawEmojiOrWord.lowercase()] ?: rawEmojiOrWord
+        val snippet = cleanSnippet(rawSnippet)
+        if (snippet.isNotBlank()) {
+            return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false)
+        }
+    }
+
+    // 3. Check "Reacted to/from <snippet>"
+    val reactedGenericRegex = Regex("^Reacted\\s+(?:to|from)\\s+(.*)$", RegexOption.IGNORE_CASE)
+    val reactedGenericMatch = reactedGenericRegex.find(text)
+    if (reactedGenericMatch != null) {
+        val rawSnippet = reactedGenericMatch.groupValues[1].trim()
+        val snippet = cleanSnippet(rawSnippet)
+        if (snippet.isNotBlank()) {
+            return ParsedReaction(emoji = "👍", snippet = snippet, isRemoval = false)
+        }
+    }
+
+    // 4. Check Verb-first patterns (iOS Tapbacks): "Liked “Hello”", "Loved an image"
+    val verbRegex = Regex("^(Liked|Loved|Disliked|Laughed at|Emphasized|Questioned)\\s+(.*)$", RegexOption.IGNORE_CASE)
+    val verbMatch = verbRegex.find(text)
+    if (verbMatch != null) {
+        val verb = verbMatch.groupValues[1].trim()
+        val rawSnippet = verbMatch.groupValues[2].trim()
+        val hasQuotes = rawSnippet.startsWith("“") || rawSnippet.startsWith("\"") || 
+                        rawSnippet.startsWith("'") || rawSnippet.startsWith("‘") || 
+                        rawSnippet.startsWith("«") || rawSnippet.startsWith("„")
+        val lowerRaw = rawSnippet.lowercase()
+        val isMediaDescriptor = lowerRaw.contains("image") || lowerRaw.contains("photo") || 
+                                lowerRaw.contains("picture") || lowerRaw.contains("video") || 
+                                lowerRaw.contains("attachment") || lowerRaw.contains("media")
+        if (hasQuotes || isMediaDescriptor) {
+            val emoji = REACTION_MAP[verb.lowercase()] ?: "👍"
+            val snippet = cleanSnippet(rawSnippet)
+            if (snippet.isNotBlank()) {
+                return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false)
+            }
+        }
+    }
+
+    // 5. Check "<emoji> to <snippet>" (e.g. "👍 to “Hello”")
+    val emojiToRegex = Regex("^(\\S+)\\s+to\\s+(.*)$", RegexOption.IGNORE_CASE)
+    val emojiToMatch = emojiToRegex.find(text)
+    if (emojiToMatch != null) {
+        val rawEmoji = emojiToMatch.groupValues[1].trim()
+        val rawSnippet = emojiToMatch.groupValues[2].trim()
+        val isKnownWord = REACTION_MAP.containsKey(rawEmoji.lowercase())
+        val isEmojiSymbol = rawEmoji.any { Character.getType(it) == Character.OTHER_SYMBOL.toInt() || Character.getType(it) == Character.SURROGATE.toInt() } || isKnownWord
+        if (isEmojiSymbol) {
+            val emoji = REACTION_MAP[rawEmoji.lowercase()] ?: rawEmoji
+            val snippet = cleanSnippet(rawSnippet)
+            if (snippet.isNotBlank()) {
+                return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false)
+            }
+        }
+    }
+
+    return null
+}
+
+private fun normalizeText(text: String): String {
+    val n = text.lowercase().replace(Regex("[^\\p{L}\\p{N}]"), "")
+    return n.ifBlank { text.trim().lowercase() }
+}
+
+private fun isTargetMatch(target: ChatMessage, snippet: String): Boolean {
+    val lowerSnippet = snippet.lowercase()
+    val isImageReq = lowerSnippet == "an image" || lowerSnippet == "a photo" || 
+                     lowerSnippet == "a picture" || lowerSnippet == "a video" || 
+                     lowerSnippet == "an attachment" || lowerSnippet == "a media" || 
+                     lowerSnippet.contains("image") || lowerSnippet.contains("photo")
+
+    if (isImageReq) {
+        if (target.imageUri != null) return true
+        val targetBody = target.body.lowercase()
+        if (targetBody.isBlank() || targetBody == "multimedia message" || 
+            targetBody.contains("image") || targetBody.contains("photo") || 
+            targetBody.contains("picture") || targetBody.contains("video") || 
+            targetBody.contains("attachment")) {
+            return true
+        }
+    }
+
+    val normSnippet = normalizeText(snippet)
+    val normTarget = normalizeText(target.body)
+
+    if (normSnippet.isBlank() || normTarget.isBlank()) return false
+
+    if (normTarget.contains(normSnippet) || normSnippet.contains(normTarget)) {
+        return true
+    }
+
+    if (normSnippet.length >= 3 && (normTarget.startsWith(normSnippet) || normSnippet.startsWith(normTarget))) {
+        return true
+    }
+
+    return false
+}
+
 private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
-    val reactionMap = mapOf(
-        "Liked" to "👍", "Loved" to "❤️", "Disliked" to "👎",
-        "Laughed at" to "😂", "Emphasized" to "‼️", "Questioned" to "❓"
-    )
-    
-    val patterns = listOf(
-        Regex("^(Liked|Loved|Disliked|Laughed at|Emphasized|Questioned) [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
-        Regex("^(\\S+) to [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
-        Regex("^Reacted (\\S+) to [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE),
-        Regex("^Removed (?:a |an )?(.+?) from [“\"'](.*)[”\"']", RegexOption.IGNORE_CASE)
-    )
-    
     val reactionMessages = mutableSetOf<String>()
     val resultMessages = messages.map { it.copy() }.toMutableList()
-    
-    fun normalize(text: String): String {
-        val n = text.lowercase().replace(Regex("[^a-z0-9]"), "")
-        return n.ifBlank { text.trim().lowercase() } // Don't return empty for emoji-only
-    }
 
     for (i in messages.indices) {
         val msg = messages[i]
-        val body = msg.body.trim()
-        if (body.isBlank()) continue
-        
-        var emoji: String? = null
-        var snippet: String? = null
-        var isRemoval = false
+        val parsed = parseReaction(msg.body) ?: continue
 
-        for (pattern in patterns) {
-            val match = pattern.find(body)
-            if (match != null) {
-                val val1 = match.groupValues[1]
-                val val2 = match.groupValues[2]
-                
-                if (pattern.pattern.contains("Removed")) {
-                    isRemoval = true
-                    emoji = reactionMap.entries.find { it.key.equals(val1, ignoreCase = true) }?.value ?: val1
-                    snippet = val2
-                } else if (pattern.pattern.startsWith("^(\\S+)")) { // emoji first style
-                    emoji = val1
-                    snippet = val2
+        var bestTargetIndex = -1
+        var bestTimeDiff = Long.MAX_VALUE
+
+        for (j in messages.indices) {
+            if (i == j) continue
+            val target = messages[j]
+
+            if (isTargetMatch(target, parsed.snippet)) {
+                val timeDiff = abs(msg.date - target.date)
+                val isBeforeOrClose = target.date <= msg.date + 60000
+
+                if (bestTargetIndex == -1) {
+                    bestTargetIndex = j
+                    bestTimeDiff = timeDiff
                 } else {
-                    emoji = reactionMap.entries.find { it.key.equals(val1, ignoreCase = true) }?.value ?: val1
-                    snippet = val2
-                }
-                break
-            }
-        }
+                    val currentBestTarget = messages[bestTargetIndex]
+                    val currentBestIsBefore = currentBestTarget.date <= msg.date + 60000
 
-        if (emoji != null && snippet != null && snippet.length >= 2) {
-            val normalizedSnippet = normalize(snippet)
-            var targetIndex = -1
-            var minTimeDiff = Long.MAX_VALUE
-            
-            for (j in messages.indices) {
-                if (i == j) continue
-                val target = messages[j]
-                val normalizedTarget = normalize(target.body)
-                
-                val bodyMatch = normalizedSnippet.isNotEmpty() && normalizedTarget.contains(normalizedSnippet)
-                val imageMatch = snippet.lowercase().contains("image") && target.imageUri != null
-                
-                if (bodyMatch || imageMatch) {
-                    val timeDiff = abs(msg.date - target.date)
-                    if (timeDiff < minTimeDiff && timeDiff < 600000) { // Max 10 mins apart
-                        minTimeDiff = timeDiff
-                        targetIndex = j
+                    if (isBeforeOrClose && !currentBestIsBefore) {
+                        bestTargetIndex = j
+                        bestTimeDiff = timeDiff
+                    } else if (isBeforeOrClose == currentBestIsBefore && timeDiff < bestTimeDiff) {
+                        bestTargetIndex = j
+                        bestTimeDiff = timeDiff
                     }
                 }
             }
-            
-            if (targetIndex != -1) {
-                val target = resultMessages[targetIndex]
-                val currentReactions = target.reactions.toMutableList()
-                if (isRemoval) {
-                    currentReactions.remove(emoji)
-                } else if (!currentReactions.contains(emoji)) {
-                    currentReactions.add(emoji)
+        }
+
+        // Fallback: If no target matched strict snippet comparison, pick the closest regular message before reaction date
+        if (bestTargetIndex == -1) {
+            for (j in messages.indices.reversed()) {
+                if (i == j) continue
+                val candidate = messages[j]
+                if (candidate.date <= msg.date + 60000 && parseReaction(candidate.body) == null) {
+                    bestTargetIndex = j
+                    break
                 }
-                resultMessages[targetIndex] = target.copy(reactions = currentReactions)
-                reactionMessages.add(msg.id)
             }
         }
+
+        if (bestTargetIndex != -1) {
+            val target = resultMessages[bestTargetIndex]
+            val currentReactions = target.reactions.toMutableList()
+
+            if (parsed.isRemoval) {
+                if (parsed.emoji.equals("reaction", ignoreCase = true)) {
+                    currentReactions.clear()
+                } else {
+                    currentReactions.remove(parsed.emoji)
+                }
+            } else {
+                if (!currentReactions.contains(parsed.emoji)) {
+                    currentReactions.add(parsed.emoji)
+                }
+            }
+
+            resultMessages[bestTargetIndex] = target.copy(reactions = currentReactions)
+            reactionMessages.add(msg.id)
+        }
     }
-    
+
     return resultMessages.filter { it.id !in reactionMessages }
 }
 
