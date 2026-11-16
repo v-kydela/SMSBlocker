@@ -67,6 +67,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -186,7 +187,7 @@ data class ChatMessage(
 data class MmsData(val text: String, val imageUri: Uri?) : Parcelable
 
 enum class ActionType {
-    DELETE, ARCHIVE, UNARCHIVE, BLOCK, UNBLOCK
+    DELETE, ARCHIVE, UNARCHIVE, BLOCK, UNBLOCK, MARK_READ
 }
 
 enum class ConversationView {
@@ -206,14 +207,15 @@ private val ALL_ACTIONS by lazy {
         ActionType.ARCHIVE to ConversationAction(ActionType.ARCHIVE, "Archive", Icons.Default.Archive),
         ActionType.UNARCHIVE to ConversationAction(ActionType.UNARCHIVE, "Unarchive", Icons.Default.Unarchive),
         ActionType.BLOCK to ConversationAction(ActionType.BLOCK, "Block & Report Spam", Icons.Default.Warning, Color.Red),
-        ActionType.UNBLOCK to ConversationAction(ActionType.UNBLOCK, "Not Spam / Unblock", Icons.Default.Check)
+        ActionType.UNBLOCK to ConversationAction(ActionType.UNBLOCK, "Not Spam / Unblock", Icons.Default.Check),
+        ActionType.MARK_READ to ConversationAction(ActionType.MARK_READ, "Mark as Read", Icons.Default.DoneAll)
     )
 }
 
 private val VIEW_ACTIONS = mapOf(
-    ConversationView.SPAM to listOf(ActionType.UNBLOCK, ActionType.ARCHIVE, ActionType.DELETE),
-    ConversationView.ARCHIVE to listOf(ActionType.UNARCHIVE, ActionType.BLOCK, ActionType.DELETE),
-    ConversationView.MAIN to listOf(ActionType.ARCHIVE, ActionType.BLOCK, ActionType.DELETE)
+    ConversationView.SPAM to listOf(ActionType.MARK_READ, ActionType.UNBLOCK, ActionType.ARCHIVE, ActionType.DELETE),
+    ConversationView.ARCHIVE to listOf(ActionType.MARK_READ, ActionType.UNARCHIVE, ActionType.BLOCK, ActionType.DELETE),
+    ConversationView.MAIN to listOf(ActionType.MARK_READ, ActionType.ARCHIVE, ActionType.BLOCK, ActionType.DELETE)
 )
 
 fun getConversationActions(view: ConversationView): List<ConversationAction> {
@@ -350,6 +352,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                     .toSet()
                 val manualArchive = getManualArchive(context)
                 val manualUnarchive = getManualUnarchive(context)
+                val manualReadTimestamps = getManualReadTimestamps(context)
                 val recordedSpam = spamTimestampPrefs.all.keys
 
                 // Phase 0: Ultra-fast check for new messages
@@ -382,6 +385,10 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                     val isForcedArchived = t.threadId in manualArchive
                     val isForcedUnarchived = t.threadId in manualUnarchive
                     
+                    val manualReadTime = manualReadTimestamps[t.threadId] ?: 0L
+                    val isManualRead = manualReadTime > 0L && t.date <= manualReadTime + 1000L
+                    val resolvedRead = t.read || isManualRead
+
                     // Trust manual list as override, then fallback to DB status
                     // Note: thread.isSpam from fetchThreadsFast is based on 'archived' or 'type'
                     // We will now treat 'archived' as ARCHIVED, and keywords/manual list/recorded spam as SPAM.
@@ -390,6 +397,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                                          else t.isArchived
 
                     t.copy(
+                        read = resolvedRead,
                         isSpam = t.isSpam || isKeywordSpam || isManualSpam || isRecordedSpam,
                         isArchived = resolvedArchived
                     )
@@ -404,7 +412,9 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                         val existing = threads.find { it.threadId == new.threadId }
                         if (existing != null) {
                             val isSameVersion = abs(new.date - existing.date) < 5000
+                            val resolvedRead = if (isSameVersion) (existing.read || new.read) else new.read
                             new.copy(
+                                read = resolvedRead,
                                 snippet = new.snippet.ifBlank { existing.snippet },
                                 contactName = new.contactName ?: existing.contactName,
                                 isSpam = existing.isSpam || new.isSpam,
@@ -432,8 +442,11 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                 
                 val syncedThreads = finalThreads.map { updated ->
                     val existing = mergedThreads.find { it.threadId == updated.threadId }
+                    val manualReadTime = manualReadTimestamps[updated.threadId] ?: 0L
+                    val isManualRead = manualReadTime > 0L && updated.date <= manualReadTime + 1000L
                     if (existing != null && abs(updated.date - existing.date) < 5000) {
                         updated.copy(
+                            read = existing.read || updated.read || isManualRead,
                             isSpam = existing.isSpam || updated.isSpam,
                             isArchived = existing.isArchived
                         )
@@ -441,6 +454,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                         val isForcedArchived = updated.threadId in manualArchive
                         val isForcedUnarchived = updated.threadId in manualUnarchive
                         updated.copy(
+                            read = updated.read || isManualRead,
                             isSpam = updated.isSpam,
                             isArchived = if (isForcedArchived) true else if (isForcedUnarchived) false else updated.isArchived
                         )
@@ -570,6 +584,49 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
         }
     }
 
+    val performMarkAsRead: (List<String>) -> Unit = { threadIds ->
+        val currentThreads = threads
+        scope.launch {
+            val now = System.currentTimeMillis()
+            val timestampsToSave = threadIds.associateWith { id ->
+                val threadDate = currentThreads.find { it.threadId == id }?.date ?: 0L
+                maxOf(threadDate, now)
+            }
+            saveManualReadTimestampsBulk(context, timestampsToSave)
+
+            withContext(Dispatchers.IO) {
+                threadIds.forEach { threadId ->
+                    markThreadAsRead(context, threadId)
+                }
+            }
+            val ids = threadIds.toSet()
+            threads = threads.map {
+                if (it.threadId in ids) it.copy(read = true) else it
+            }
+            saveThreadsToCache(context, threads)
+            refreshTrigger++
+        }
+    }
+
+    val performMarkAllAsRead: () -> Unit = {
+        val currentThreads = threads
+        scope.launch {
+            val now = System.currentTimeMillis()
+            val timestampsToSave = currentThreads.associateWith { thread ->
+                maxOf(thread.date, now)
+            }.mapKeys { it.key.threadId }
+            saveManualReadTimestampsBulk(context, timestampsToSave)
+
+            withContext(Dispatchers.IO) {
+                markAllThreadsAsRead(context)
+            }
+            threads = threads.map { it.copy(read = true) }
+            saveThreadsToCache(context, threads)
+            refreshTrigger++
+            Toast.makeText(context, "All messages marked as read", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     BackHandler(enabled = currentScreen != "threads" || selectedImageUri != null || selectedThreadIds.isNotEmpty()) {
         if (selectedImageUri != null) {
             selectedImageUri = null
@@ -605,17 +662,21 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                             // Mark as read in DB and update local state
                             if (!thread.read) {
                                 scope.launch {
+                                    saveManualReadTimestamp(context, thread.threadId, maxOf(thread.date, System.currentTimeMillis()))
                                     markThreadAsRead(context, thread.threadId)
                                     threads = threads.map { 
                                         if (it.threadId == thread.threadId) it.copy(read = true) else it 
                                     }
+                                    saveThreadsToCache(context, threads)
                                 }
                             }
                         },
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThreads = performDelete,
                         onBlockThreads = performBlock,
-                        onArchiveThreads = performArchive
+                        onArchiveThreads = performArchive,
+                        onMarkAsReadThreads = performMarkAsRead,
+                        onMarkAllAsRead = performMarkAllAsRead
                     )
                     "spam" -> ConversationListScreen(
                         threads = threads.filter { it.isSpam },
@@ -633,11 +694,23 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                             selectedAddress = thread.address
                             returnToScreen = "spam"
                             currentScreen = "chat"
+                            if (!thread.read) {
+                                scope.launch {
+                                    saveManualReadTimestamp(context, thread.threadId, maxOf(thread.date, System.currentTimeMillis()))
+                                    markThreadAsRead(context, thread.threadId)
+                                    threads = threads.map { 
+                                        if (it.threadId == thread.threadId) it.copy(read = true) else it 
+                                    }
+                                    saveThreadsToCache(context, threads)
+                                }
+                            }
                         },
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThreads = performDelete,
                         onUnblockThreads = performUnblock,
-                        onArchiveThreads = performArchive
+                        onArchiveThreads = performArchive,
+                        onMarkAsReadThreads = performMarkAsRead,
+                        onMarkAllAsRead = performMarkAllAsRead
                     )
                     "archived" -> ConversationListScreen(
                         threads = threads.filter { it.isArchived && !it.isSpam },
@@ -655,11 +728,23 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                             selectedAddress = thread.address
                             returnToScreen = "archived"
                             currentScreen = "chat"
+                            if (!thread.read) {
+                                scope.launch {
+                                    saveManualReadTimestamp(context, thread.threadId, maxOf(thread.date, System.currentTimeMillis()))
+                                    markThreadAsRead(context, thread.threadId)
+                                    threads = threads.map { 
+                                        if (it.threadId == thread.threadId) it.copy(read = true) else it 
+                                    }
+                                    saveThreadsToCache(context, threads)
+                                }
+                            }
                         },
                         onNewChat = { currentScreen = "new_chat" },
                         onDeleteThreads = performDelete,
                         onUnarchiveThreads = performUnarchive,
-                        onBlockThreads = performBlock
+                        onBlockThreads = performBlock,
+                        onMarkAsReadThreads = performMarkAsRead,
+                        onMarkAllAsRead = performMarkAllAsRead
                     )
                     "chat" -> ChatScreen(
                         threadId = selectedThreadId!!,
@@ -1043,7 +1128,9 @@ fun ConversationListScreen(
     onBlockThreads: (List<MessageThread>) -> Unit = {},
     onUnblockThreads: (List<MessageThread>) -> Unit = {},
     onArchiveThreads: (List<String>) -> Unit = {},
-    onUnarchiveThreads: (List<String>) -> Unit = {}
+    onUnarchiveThreads: (List<String>) -> Unit = {},
+    onMarkAsReadThreads: (List<String>) -> Unit = {},
+    onMarkAllAsRead: () -> Unit = {}
 ) {
     var threadsToDelete by rememberSaveable { mutableStateOf<List<String>?>(null) }
     var threadsToBlock by rememberSaveable { mutableStateOf<List<MessageThread>?>(null) }
@@ -1062,6 +1149,7 @@ fun ConversationListScreen(
             ActionType.UNARCHIVE -> onUnarchiveThreads(threadIds)
             ActionType.BLOCK -> threadsToBlock = threads.filter { it.threadId in threadIds }
             ActionType.UNBLOCK -> onUnblockThreads(threads.filter { it.threadId in threadIds })
+            ActionType.MARK_READ -> onMarkAsReadThreads(threadIds)
         }
         onSelectionChange(emptySet())
     }
@@ -1074,6 +1162,7 @@ fun ConversationListScreen(
             ActionType.UNARCHIVE -> onUnarchiveThreads(threadIds)
             ActionType.BLOCK -> threadsToBlock = listOf(thread)
             ActionType.UNBLOCK -> onUnblockThreads(listOf(thread))
+            ActionType.MARK_READ -> onMarkAsReadThreads(threadIds)
         }
     }
 
@@ -1121,6 +1210,14 @@ fun ConversationListScreen(
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
+                    },
+                    actions = {
+                        val hasUnread = remember(threads) { threads.any { !it.read } }
+                        if (hasUnread) {
+                            IconButton(onClick = onMarkAllAsRead) {
+                                Icon(Icons.Default.DoneAll, contentDescription = "Mark all as read")
+                            }
+                        }
                     }
                 )
             }
@@ -1163,6 +1260,16 @@ fun ConversationListScreen(
                                         }
                                     } else {
                                         Row {
+                                            val hasUnread = remember(threads) { threads.any { !it.read } }
+                                            if (hasUnread) {
+                                                IconButton(onClick = onMarkAllAsRead) {
+                                                    Icon(
+                                                        Icons.Default.DoneAll,
+                                                        contentDescription = "Mark all as read",
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
                                             IconButton(onClick = onArchiveClick) {
                                                 Icon(Icons.Default.Archive, contentDescription = "Archive", tint = MaterialTheme.colorScheme.outline)
                                             }
@@ -1704,6 +1811,7 @@ fun ChatScreen(
                                         ActionType.UNARCHIVE -> onUnarchive()
                                         ActionType.BLOCK -> showBlockDialog = true
                                         ActionType.UNBLOCK -> onUnblock()
+                                        ActionType.MARK_READ -> {}
                                     }
                                 }
                             )
@@ -3025,6 +3133,37 @@ private suspend fun markThreadAsRead(context: Context, threadId: String) = withC
         Log.d("SMSBlocker", "Thread $threadId marked as read (Success: $isDefault)")
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to mark thread as read", e)
+    }
+}
+
+private suspend fun markAllThreadsAsRead(context: Context) = withContext(Dispatchers.IO) {
+    val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    if (!isDefault) {
+        Log.w("SMSBlocker", "Not default SMS app: markAllThreadsAsRead will likely be ignored by the system.")
+    }
+
+    try {
+        val values = android.content.ContentValues().apply {
+            put("read", 1)
+            put("seen", 1)
+        }
+        
+        val contentResolver = context.contentResolver
+
+        // 1. Mark SMS as read and seen
+        contentResolver.update(Telephony.Sms.CONTENT_URI, values, "read = 0 OR seen = 0", null)
+        
+        // 2. Mark MMS as read and seen
+        val mmsUri = "content://mms/".toUri()
+        contentResolver.update(mmsUri, values, "read = 0 OR seen = 0", null)
+        
+        // 3. Update the conversation threads
+        val threadUri = "content://mms-sms/conversations".toUri()
+        contentResolver.update(threadUri, values, null, null)
+        
+        Log.d("SMSBlocker", "All threads marked as read (Success: $isDefault)")
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to mark all threads as read", e)
     }
 }
 
