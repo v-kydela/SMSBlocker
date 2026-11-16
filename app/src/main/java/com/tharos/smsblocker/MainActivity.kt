@@ -149,6 +149,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
@@ -1314,6 +1315,17 @@ fun ConversationListScreen(
     }
 }
 
+fun formatTimestamp(dateMillis: Long): String {
+    val messageCal = Calendar.getInstance().apply { timeInMillis = dateMillis }
+    val currentCal = Calendar.getInstance()
+    val pattern = if (messageCal.get(Calendar.YEAR) != currentCal.get(Calendar.YEAR)) {
+        "MMM d, yyyy, HH:mm"
+    } else {
+        "MMM d, HH:mm"
+    }
+    return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(dateMillis))
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ThreadItem(
@@ -1324,7 +1336,7 @@ fun ThreadItem(
     actions: List<ConversationAction>,
     onAction: (ActionType, MessageThread) -> Unit
 ) {
-    val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    val formattedDate = remember(thread.date) { formatTimestamp(thread.date) }
     var showMenu by remember { mutableStateOf(false) }
     
     Row(
@@ -1371,7 +1383,7 @@ fun ThreadItem(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = timeFormat.format(Date(thread.date)),
+                    text = formattedDate,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline
                 )
@@ -1804,7 +1816,7 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
     val alignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
     val color = if (message.isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
     val textColor = if (message.isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
-    val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    val formattedDate = remember(message.date) { formatTimestamp(message.date) }
     
     val bubbleShape = if (message.isMe) {
         RoundedCornerShape(16.dp, 16.dp, 2.dp, 16.dp)
@@ -1920,7 +1932,7 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                         }
 
                         Text(
-                            text = timeFormat.format(Date(message.date)),
+                            text = formattedDate,
                             color = textColor.copy(alpha = 0.7f),
                             style = MaterialTheme.typography.labelSmall,
                             modifier = Modifier
