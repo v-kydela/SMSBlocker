@@ -63,6 +63,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -1709,11 +1710,20 @@ fun ChatScreen(
     var currentThreadId by rememberSaveable(threadId) { mutableStateOf(threadId) }
     var messages by rememberSaveable(currentThreadId) { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var textValue by rememberSaveable { mutableStateOf("") }
+    var attachedUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     val listState = rememberLazyListState()
     var isLoading by remember(currentThreadId) { mutableStateOf(currentThreadId != "-1") }
     var showBlockDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showDetailsDialog by remember { mutableStateOf(false) }
+
+    val attachmentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            attachedUri = uri
+        }
+    }
 
     val actions = remember(view) {
         getConversationActions(view)
@@ -1870,6 +1880,56 @@ fun ChatScreen(
                 }
             }
 
+            if (attachedUri != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AsyncImage(
+                                model = attachedUri,
+                                contentDescription = "Attachment preview",
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Attachment added",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = attachedUri?.lastPathSegment ?: "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(onClick = { attachedUri = null }) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Remove attachment"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1877,6 +1937,16 @@ fun ChatScreen(
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                IconButton(
+                    onClick = { attachmentPickerLauncher.launch("*/*") }
+                ) {
+                    Icon(
+                        Icons.Default.AttachFile,
+                        contentDescription = "Attach file or image",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
                 TextField(
                     value = textValue,
                     onValueChange = { textValue = it },
@@ -1891,16 +1961,39 @@ fun ChatScreen(
                 Spacer(modifier = Modifier.width(8.dp))
                 IconButton(
                     onClick = {
-                        if (textValue.isNotBlank()) {
+                        if (textValue.isNotBlank() || attachedUri != null) {
                             val body = textValue
+                            val uriToSend = attachedUri
                             textValue = ""
+                            attachedUri = null
                             scope.launch {
-                                sendMessage(context, address, body, if (currentThreadId == "-1") null else currentThreadId)
+                                if (uriToSend != null) {
+                                    sendMmsMessage(
+                                        context,
+                                        address,
+                                        body,
+                                        uriToSend,
+                                        if (currentThreadId == "-1") null else currentThreadId
+                                    )
+                                } else {
+                                    sendMessage(
+                                        context,
+                                        address,
+                                        body,
+                                        if (currentThreadId == "-1") null else currentThreadId
+                                    )
+                                }
                                 if (currentThreadId == "-1") {
                                     currentThreadId = fetchThreadIdByAddress(context, address) ?: "-1"
                                     if (currentThreadId == "-1") {
                                         // Still no thread ID, maybe it's a new message that hasn't hit DB yet
-                                        messages = messages + ChatMessage("temp_${System.currentTimeMillis()}", body, System.currentTimeMillis(), true)
+                                        messages = messages + ChatMessage(
+                                            id = "temp_${System.currentTimeMillis()}",
+                                            body = body,
+                                            date = System.currentTimeMillis(),
+                                            isMe = true,
+                                            imageUri = uriToSend
+                                        )
                                     }
                                 }
                                 if (currentThreadId != "-1") {
@@ -1909,7 +2002,7 @@ fun ChatScreen(
                             }
                         }
                     },
-                    enabled = textValue.isNotBlank()
+                    enabled = textValue.isNotBlank() || attachedUri != null
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
                 }
@@ -3284,6 +3377,76 @@ private suspend fun sendMessage(context: Context, address: String, body: String,
         context.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, values)
     } catch (e: Exception) {
         e.printStackTrace()
+    }
+}
+
+private suspend fun sendMmsMessage(
+    context: Context,
+    address: String,
+    body: String,
+    imageUri: Uri,
+    threadId: String?
+) = withContext(Dispatchers.IO) {
+    try {
+        val contentResolver = context.contentResolver
+        val resolvedThreadId = threadId?.takeIf { it != "-1" } 
+            ?: fetchThreadIdByAddress(context, address)
+            ?: try { Telephony.Threads.getOrCreateThreadId(context, address).toString() } catch (_: Exception) { "-1" }
+
+        val mimeType = contentResolver.getType(imageUri) ?: "image/jpeg"
+
+        val mmsValues = android.content.ContentValues().apply {
+            if (resolvedThreadId != "-1") {
+                put(Telephony.Mms.THREAD_ID, resolvedThreadId)
+            }
+            put(Telephony.Mms.MESSAGE_BOX, Telephony.Mms.MESSAGE_BOX_SENT)
+            put(Telephony.Mms.READ, 1)
+            put(Telephony.Mms.DATE, System.currentTimeMillis() / 1000)
+            if (body.isNotBlank()) {
+                put(Telephony.Mms.SUBJECT, body.take(40))
+            }
+            put(Telephony.Mms.CONTENT_TYPE, "application/vnd.wap.mms-message")
+            put(Telephony.Mms.MMS_VERSION, 0x12)
+        }
+
+        val mmsUri = contentResolver.insert(Telephony.Mms.Sent.CONTENT_URI, mmsValues)
+        if (mmsUri != null) {
+            val mmsId = mmsUri.lastPathSegment ?: ""
+            val partUri = "content://mms/$mmsId/part".toUri()
+
+            if (body.isNotBlank()) {
+                val textPartValues = android.content.ContentValues().apply {
+                    put("mid", mmsId)
+                    put("ct", "text/plain")
+                    put("text", body)
+                }
+                contentResolver.insert(partUri, textPartValues)
+            }
+
+            val mediaPartValues = android.content.ContentValues().apply {
+                put("mid", mmsId)
+                put("ct", mimeType)
+                put("cl", "attachment")
+            }
+            val insertedPartUri = contentResolver.insert(partUri, mediaPartValues)
+
+            if (insertedPartUri != null) {
+                contentResolver.openOutputStream(insertedPartUri)?.use { output ->
+                    contentResolver.openInputStream(imageUri)?.use { input ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+
+            try {
+                val smsManager = context.getSystemService(SmsManager::class.java)
+                smsManager?.sendMultimediaMessage(context, mmsUri, null, null, null)
+            } catch (e: Exception) {
+                Log.w("SMSBlocker", "SmsManager sendMultimediaMessage failed: ${e.message}")
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to send MMS message", e)
     }
 }
 
