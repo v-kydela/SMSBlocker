@@ -73,6 +73,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Unarchive
@@ -181,11 +182,12 @@ data class ChatMessage(
     val date: Long,
     val isMe: Boolean,
     val imageUri: Uri? = null,
+    val isVideo: Boolean = false,
     val reactions: List<String> = emptyList()
 ) : Parcelable
 
 @Parcelize
-data class MmsData(val text: String, val imageUri: Uri?) : Parcelable
+data class MmsData(val text: String, val imageUri: Uri?, val isVideo: Boolean = false) : Parcelable
 
 enum class ActionType {
     DELETE, ARCHIVE, UNARCHIVE, BLOCK, UNBLOCK, MARK_READ
@@ -1881,6 +1883,7 @@ fun ChatScreen(
             }
 
             if (attachedUri != null) {
+                val isVideo = remember(attachedUri) { isVideoUri(context, attachedUri!!) }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1896,18 +1899,39 @@ fun ChatScreen(
                             modifier = Modifier.padding(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            AsyncImage(
-                                model = attachedUri,
-                                contentDescription = "Attachment preview",
+                            Box(
                                 modifier = Modifier
                                     .size(56.dp)
                                     .clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Crop
-                            )
+                                contentAlignment = Alignment.Center
+                            ) {
+                                AsyncImage(
+                                    model = attachedUri,
+                                    contentDescription = "Attachment preview",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                                if (isVideo) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color.Black.copy(alpha = 0.6f),
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                Icons.Default.PlayArrow,
+                                                contentDescription = null,
+                                                tint = Color.White,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Attachment added",
+                                    text = if (isVideo) "Video attachment added" else "Attachment added",
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -1964,6 +1988,7 @@ fun ChatScreen(
                         if (textValue.isNotBlank() || attachedUri != null) {
                             val body = textValue
                             val uriToSend = attachedUri
+                            val isVideoToSend = if (uriToSend != null) isVideoUri(context, uriToSend) else false
                             textValue = ""
                             attachedUri = null
                             scope.launch {
@@ -1992,7 +2017,8 @@ fun ChatScreen(
                                             body = body,
                                             date = System.currentTimeMillis(),
                                             isMe = true,
-                                            imageUri = uriToSend
+                                            imageUri = uriToSend,
+                                            isVideo = isVideoToSend
                                         )
                                     }
                                 }
@@ -2035,16 +2061,43 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                 SelectionContainer {
                     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                         if (message.imageUri != null) {
-                            AsyncImage(
-                                model = message.imageUri,
-                                contentDescription = null,
+                            Box(
                                 modifier = Modifier
                                     .padding(bottom = 4.dp)
                                     .sizeIn(maxWidth = 240.dp, maxHeight = 320.dp)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .clickable { onImageClick(message.imageUri) },
-                                contentScale = ContentScale.Fit
-                            )
+                                    .clickable {
+                                        if (message.isVideo) {
+                                            openVideo(context, message.imageUri)
+                                        } else {
+                                            onImageClick(message.imageUri)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                AsyncImage(
+                                    model = message.imageUri,
+                                    contentDescription = if (message.isVideo) "Video attachment" else "Image attachment",
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentScale = ContentScale.Fit
+                                )
+                                if (message.isVideo) {
+                                    Surface(
+                                        shape = RoundedCornerShape(24.dp),
+                                        color = Color.Black.copy(alpha = 0.6f),
+                                        modifier = Modifier.size(48.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                Icons.Default.PlayArrow,
+                                                contentDescription = "Play video",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(32.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if (message.body.isNotBlank()) {
                             val uriHandler = LocalUriHandler.current
@@ -2763,7 +2816,9 @@ private fun fetchFallbackSnippet(contentResolver: ContentResolver, threadId: Str
         return if (mmsId != null && mmsDate > smsDate) {
             val data = fetchMmsData(contentResolver, mmsId)
             if (data.text.isNotBlank()) data.text 
-            else if (data.imageUri != null) "Multimedia message" 
+            else if (data.imageUri != null) {
+                if (data.isVideo) "Video message" else "Multimedia message"
+            } 
             else smsBody
         } else {
             smsBody
@@ -2909,7 +2964,8 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
                                     body = bodyText,
                                     date = date,
                                     isMe = isMe,
-                                    imageUri = mmsData.imageUri
+                                    imageUri = mmsData.imageUri,
+                                    isVideo = mmsData.isVideo
                                 ))
                             }
                         }
@@ -3171,6 +3227,7 @@ private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsDa
     val uri = "content://mms/part".toUri()
     var text = ""
     var imageUri: Uri? = null
+    var isVideo = false
     
     try {
         contentResolver.query(uri, null, selection, selectionArgs, null)?.use { cursor ->
@@ -3182,10 +3239,11 @@ private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsDa
                 val ct = if (ctIdx != -1) cursor.getString(ctIdx) else null
                 if (ct == "text/plain") {
                     if (textIdx != -1) text += (cursor.getString(textIdx) ?: "")
-                } else if (ct != null && ct.startsWith("image/")) {
+                } else if (ct != null && (ct.startsWith("image/") || ct.startsWith("video/"))) {
                     if (idIdx != -1) {
                         val partId = cursor.getString(idIdx)
                         imageUri = "content://mms/part/$partId".toUri()
+                        isVideo = ct.startsWith("video/")
                     }
                 }
             }
@@ -3193,7 +3251,7 @@ private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsDa
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Error fetching MMS data for part $mmsId", e)
     }
-    return MmsData(text, imageUri)
+    return MmsData(text, imageUri, isVideo)
 }
 
 private suspend fun markThreadAsRead(context: Context, threadId: String) = withContext(Dispatchers.IO) {
@@ -3380,6 +3438,29 @@ private suspend fun sendMessage(context: Context, address: String, body: String,
     }
 }
 
+fun isVideoUri(context: Context, uri: Uri): Boolean {
+    val type = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
+    if (type != null) {
+        return type.startsWith("video/")
+    }
+    val path = uri.toString().lowercase()
+    return path.endsWith(".mp4") || path.endsWith(".3gp") || path.endsWith(".mkv") ||
+           path.endsWith(".webm") || path.endsWith(".avi") || path.endsWith(".mov")
+}
+
+fun openVideo(context: Context, uri: Uri) {
+    try {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Log.e("SMSBlocker", "Failed to open video", e)
+        Toast.makeText(context, "No app found to play video", Toast.LENGTH_SHORT).show()
+    }
+}
+
 private suspend fun sendMmsMessage(
     context: Context,
     address: String,
@@ -3393,7 +3474,19 @@ private suspend fun sendMmsMessage(
             ?: fetchThreadIdByAddress(context, address)
             ?: try { Telephony.Threads.getOrCreateThreadId(context, address).toString() } catch (_: Exception) { "-1" }
 
-        val mimeType = contentResolver.getType(imageUri) ?: "image/jpeg"
+        var mimeType = contentResolver.getType(imageUri)
+        if (mimeType == null) {
+            val uriStr = imageUri.toString().lowercase()
+            mimeType = when {
+                uriStr.endsWith(".mp4") -> "video/mp4"
+                uriStr.endsWith(".3gp") -> "video/3gpp"
+                uriStr.endsWith(".mkv") -> "video/x-matroska"
+                uriStr.endsWith(".webm") -> "video/webm"
+                uriStr.endsWith(".png") -> "image/png"
+                uriStr.endsWith(".gif") -> "image/gif"
+                else -> if (isVideoUri(context, imageUri)) "video/mp4" else "image/jpeg"
+            }
+        }
 
         val mmsValues = android.content.ContentValues().apply {
             if (resolvedThreadId != "-1") {
@@ -3426,7 +3519,7 @@ private suspend fun sendMmsMessage(
             val mediaPartValues = android.content.ContentValues().apply {
                 put("mid", mmsId)
                 put("ct", mimeType)
-                put("cl", "attachment")
+                put("cl", if (mimeType.startsWith("video/")) "video" else "attachment")
             }
             val insertedPartUri = contentResolver.insert(partUri, mediaPartValues)
 
