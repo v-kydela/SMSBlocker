@@ -209,6 +209,7 @@ fun clearNotificationMessages(context: Context, sender: String) {
 }
 
 private const val PREFS_MANUAL_READ = "manual_read_timestamps"
+private const val PREFS_MANUAL_UNREAD = "manual_unread"
 
 fun getManualReadTimestamps(context: Context): Map<String, Long> {
     val prefs = context.getSharedPreferences(PREFS_MANUAL_READ, Context.MODE_PRIVATE)
@@ -230,3 +231,17 @@ fun saveManualReadTimestampsBulk(context: Context, timestamps: Map<String, Long>
         }
     }
 }
+
+fun removeManualReadTimestampsBulk(context: Context, threadIds: Collection<String>) {
+    val prefs = context.getSharedPreferences(PREFS_MANUAL_READ, Context.MODE_PRIVATE)
+    prefs.edit {
+        threadIds.forEach { remove(it) }
+    }
+}
+
+fun getManualUnread(context: Context): Set<String> =
+    getStringSetPref(context, PREFS_MANUAL_UNREAD, KEY_IDS)
+
+fun saveManualUnread(context: Context, ids: Set<String>) =
+    saveStringSetPref(context, PREFS_MANUAL_UNREAD, KEY_IDS, ids)
+
