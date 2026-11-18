@@ -10,6 +10,8 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -1884,6 +1886,9 @@ fun ChatScreen(
 
             if (attachedUri != null) {
                 val isVideo = remember(attachedUri) { isVideoUri(context, attachedUri!!) }
+                val videoThumbnail = if (isVideo) rememberVideoThumbnail(attachedUri) else null
+                val previewModel: Any = if (isVideo) (videoThumbnail ?: attachedUri!!) else attachedUri!!
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1906,7 +1911,7 @@ fun ChatScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 AsyncImage(
-                                    model = attachedUri,
+                                    model = previewModel,
                                     contentDescription = "Attachment preview",
                                     modifier = Modifier.fillMaxSize(),
                                     contentScale = ContentScale.Crop
@@ -2061,6 +2066,9 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                 SelectionContainer {
                     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                         if (message.imageUri != null) {
+                            val videoThumbnail = if (message.isVideo) rememberVideoThumbnail(message.imageUri) else null
+                            val imageModel: Any = if (message.isVideo) (videoThumbnail ?: message.imageUri) else message.imageUri
+
                             Box(
                                 modifier = Modifier
                                     .padding(bottom = 4.dp)
@@ -2076,7 +2084,7 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
                                 contentAlignment = Alignment.Center
                             ) {
                                 AsyncImage(
-                                    model = message.imageUri,
+                                    model = imageModel,
                                     contentDescription = if (message.isVideo) "Video attachment" else "Image attachment",
                                     modifier = Modifier.fillMaxWidth(),
                                     contentScale = ContentScale.Fit
@@ -3436,6 +3444,33 @@ private suspend fun sendMessage(context: Context, address: String, body: String,
     } catch (e: Exception) {
         e.printStackTrace()
     }
+}
+
+@Composable
+fun rememberVideoThumbnail(uri: Uri?): Bitmap? {
+    val context = LocalContext.current
+    var bitmap by remember(uri) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(uri) {
+        if (uri != null) {
+            withContext(Dispatchers.IO) {
+                var retriever: MediaMetadataRetriever? = null
+                try {
+                    retriever = MediaMetadataRetriever()
+                    retriever.setDataSource(context, uri)
+                    val frame = retriever.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.frameAtTime
+                    bitmap = frame
+                } catch (e: Exception) {
+                    Log.e("SMSBlocker", "Failed to extract video thumbnail", e)
+                } finally {
+                    try { retriever?.release() } catch (_: Exception) {}
+                }
+            }
+        } else {
+            bitmap = null
+        }
+    }
+    return bitmap
 }
 
 fun isVideoUri(context: Context, uri: Uri): Boolean {
