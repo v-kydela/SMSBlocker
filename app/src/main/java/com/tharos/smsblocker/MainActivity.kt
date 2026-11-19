@@ -313,7 +313,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
     // Cache threads at the navigation level to avoid re-loading when returning from chat
     var threads by remember { mutableStateOf(loadThreadsFromCache(context)) }
     val deletionPrefs = remember { context.getSharedPreferences("pending_deletions", Context.MODE_PRIVATE) }
-    var pendingDeletions by remember { 
+    var pendingDeletions by remember {
         mutableStateOf(deletionPrefs.getStringSet("ids", emptySet()) ?: emptySet()) 
     }
     var isLoading by rememberSaveable { mutableStateOf(hasRequiredPermissions && threads.isEmpty()) }
@@ -321,7 +321,7 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
 
     val contactPrefs = remember { context.getSharedPreferences("contact_names", Context.MODE_PRIVATE) }
     val spamTimestampPrefs = remember { context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE) }
-    var contactCache by remember { 
+    var contactCache by remember {
         mutableStateOf(contactPrefs.all.mapValues { it.value.toString() }) 
     }
 
@@ -1289,7 +1289,10 @@ fun ConversationListScreen(
         },
         floatingActionButton = {
             if (!isSearchActive && view == ConversationView.MAIN && selectedThreadIds.isEmpty()) {
-                FloatingActionButton(onClick = onNewChat) {
+                FloatingActionButton(
+                    onClick = onNewChat,
+                    modifier = Modifier.navigationBarsPadding()
+                ) {
                     Icon(Icons.Default.Add, contentDescription = "New Message")
                 }
             }
@@ -2829,7 +2832,7 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
         } else {
             thread.address
         }
-        val addr = if (resolvedAddr.isBlank()) "Unknown" else resolvedAddr
+        val addr = resolvedAddr.ifBlank { "Unknown" }
         val normalized = addr.replace(Regex("[^0-9+]"), "")
         thread.copy(
             address = addr,
@@ -2843,7 +2846,7 @@ private suspend fun resolveMissingSnippets(context: Context, threads: List<Messa
     return@withContext kotlinx.coroutines.coroutineScope {
         threads.map { thread ->
             async {
-                val snippet = if (thread.snippet.isBlank()) fetchFallbackSnippet(contentResolver, thread.threadId) else thread.snippet
+                val snippet = thread.snippet.ifBlank { fetchFallbackSnippet(contentResolver, thread.threadId) }
                 val (latestDate, latestAddr) = fetchLatestMessageInfo(contentResolver, thread.threadId)
                 val newDate = if (latestDate > 0L) maxOf(thread.date, latestDate) else thread.date
                 val newAddr = if (thread.address == "Unknown" || thread.address.isBlank()) (latestAddr ?: thread.address) else thread.address
