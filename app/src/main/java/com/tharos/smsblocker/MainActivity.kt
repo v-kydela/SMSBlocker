@@ -417,13 +417,16 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                 val mergedThreads = if (threads.isEmpty()) {
                     filteredBase
                 } else {
-                    filteredBase.map { new ->
+                    val fetchedIds = filteredBase.map { it.threadId }.toSet()
+                    val updatedFromFetched = filteredBase.map { new ->
                         val existing = threads.find { it.threadId == new.threadId }
                         if (existing != null) {
                             val isSameVersion = abs(new.date - existing.date) < 5000
                             val isForcedUnread = new.threadId in manualUnread
                             val resolvedRead = if (isForcedUnread) false else if (isSameVersion) (existing.read || new.read) else new.read
+                            val maxDate = maxOf(new.date, existing.date)
                             new.copy(
+                                date = maxDate,
                                 read = resolvedRead,
                                 snippet = new.snippet.ifBlank { existing.snippet },
                                 contactName = new.contactName ?: existing.contactName,
@@ -434,6 +437,8 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                             new
                         }
                     }
+                    val missingFromFetched = threads.filter { it.threadId !in fetchedIds && it.threadId !in pendingDeletions }
+                    (updatedFromFetched + missingFromFetched).sortedByDescending { it.date }
                 }
 
                 withContext(Dispatchers.Main) {
@@ -472,8 +477,12 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
                     }
                 }
 
+                val finalIds = syncedThreads.map { it.threadId }.toSet()
+                val extraFromMerged = mergedThreads.filter { it.threadId !in finalIds && it.threadId !in pendingDeletions }
+                val allSynced = (syncedThreads + extraFromMerged).sortedByDescending { it.date }
+
                 withContext(Dispatchers.Main) {
-                    threads = syncedThreads
+                    threads = allSynced
                 }
 
                 // Track when threads enter spam and auto-delete after 7 days
@@ -2690,11 +2699,11 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
     // Fetch a larger batch to account for mixed unit (s vs ms) sorting issues in SQL
     val sortOrder = "date DESC LIMIT 250"
 
-    val baseThreads = mutableListOf<MessageThread>()
+    val baseThreadsMap = mutableMapOf<String, MessageThread>()
     val recipientIdSet = mutableSetOf<String>()
 
     try {
-        contentResolver.query(uri, projection, "message_count > 0", null, sortOrder)?.use { c ->
+        contentResolver.query(uri, projection, null, null, sortOrder)?.use { c ->
             val idIdx = c.getColumnIndex("_id")
             val snippetIdx = c.getColumnIndex("snippet")
             val dateIdx = c.getColumnIndex("date")
@@ -2702,14 +2711,9 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
             val recipientIdsIdx = c.getColumnIndex("recipient_ids")
             val typeIdx = c.getColumnIndex("type")
             val archivedIdx = c.getColumnIndex("archived")
-            val msgCountIdx = c.getColumnIndex("message_count")
             
             while (c.moveToNext()) {
                 val threadId = c.getString(idIdx) ?: continue
-                
-                // Filter out empty threads
-                val messageCount = if (msgCountIdx != -1) c.getInt(msgCountIdx) else 1
-                if (messageCount == 0) continue
 
                 val snippet = c.getString(snippetIdx) ?: ""
                 var date = c.getLong(dateIdx)
@@ -2732,15 +2736,21 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
                 val isSpam = type == 4
                 val isArchived = archived || type == 2
 
-                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read, isSpam = isSpam, isArchived = isArchived))
+                baseThreadsMap[threadId] = MessageThread(
+                    threadId = threadId, 
+                    address = firstId, 
+                    contactName = null, 
+                    snippet = snippet, 
+                    date = date, 
+                    read = read, 
+                    isSpam = isSpam, 
+                    isArchived = isArchived
+                )
             }
         }
     } catch (e: Exception) {
         Log.e("SMSBlocker", "Failed to query conversations", e)
-        return@withContext fetchThreadsFastLegacy(context, contactCache)
     }
-
-    if (baseThreads.isEmpty()) return@withContext emptyList()
 
     val addrMap = mutableMapOf<String, String>()
     if (recipientIdSet.isNotEmpty()) {
@@ -2758,83 +2768,68 @@ private suspend fun fetchThreadsFast(context: Context, contactCache: Map<String,
         }
     }
 
-    return@withContext baseThreads.map { thread ->
-        val addr = addrMap[thread.address] ?: "Unknown"
-        val normalized = addr.replace(Regex("[^0-9+]"), "")
-        thread.copy(
-            address = addr,
-            contactName = contactCache[normalized]
-        )
-    }.sortedByDescending { it.date }
-}
-
-private suspend fun fetchThreadsFastLegacy(context: Context, contactCache: Map<String, String>): List<MessageThread> = withContext(Dispatchers.IO) {
-    val contentResolver: ContentResolver = context.contentResolver
-    val uri = "content://mms-sms/conversations?simple=true".toUri()
-    val projection = arrayOf("_id", "snippet", "date", "read", "recipient_ids", "message_count")
-    val sortOrder = "date DESC LIMIT 100" // Increased from 30
-
-    val baseThreads = mutableListOf<MessageThread>()
-    val recipientIdSet = mutableSetOf<String>()
-
+    // Scan Telephony.Sms to discover sent-only or unlisted threads and ensure latest message date & snippet are accurate
     try {
-        contentResolver.query(uri, projection, "message_count > 0", null, sortOrder)?.use { c ->
-            val idIdx = c.getColumnIndex("_id")
-            val snippetIdx = c.getColumnIndex("snippet")
-            val dateIdx = c.getColumnIndex("date")
-            val readIdx = c.getColumnIndex("read")
-            val recipientIdsIdx = c.getColumnIndex("recipient_ids")
-            val msgCountIdx = c.getColumnIndex("message_count")
-            
+        val smsUri = Telephony.Sms.CONTENT_URI
+        val smsProjection = arrayOf(
+            Telephony.Sms.THREAD_ID,
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+            Telephony.Sms.READ
+        )
+        contentResolver.query(smsUri, smsProjection, null, null, "date DESC LIMIT 500")?.use { c ->
+            val tidIdx = c.getColumnIndex(Telephony.Sms.THREAD_ID)
+            val addrIdx = c.getColumnIndex(Telephony.Sms.ADDRESS)
+            val bodyIdx = c.getColumnIndex(Telephony.Sms.BODY)
+            val dateIdx = c.getColumnIndex(Telephony.Sms.DATE)
+            val readIdx = c.getColumnIndex(Telephony.Sms.READ)
+
             while (c.moveToNext()) {
-                val threadId = c.getString(idIdx) ?: continue
-
-                // Filter out empty threads
-                val messageCount = if (msgCountIdx != -1) c.getInt(msgCountIdx) else 1
-                if (messageCount == 0) continue
-
-                val snippet = c.getString(snippetIdx) ?: ""
+                val threadId = c.getString(tidIdx) ?: continue
+                val address = c.getString(addrIdx) ?: ""
+                val body = c.getString(bodyIdx) ?: ""
                 var date = c.getLong(dateIdx)
-                // Normalize dates: MMS is often in seconds, while SMS is in milliseconds
                 if (date < 10000000000L) date *= 1000
-                
-                // Cap date to prevent future-dated messages from sticking to the top
-                val now = System.currentTimeMillis()
-                if (date > now + 60000) date = now
-
                 val read = c.getInt(readIdx) == 1
-                val recipientIds = c.getString(recipientIdsIdx) ?: ""
-                
-                val firstId = recipientIds.split(" ").firstOrNull() ?: ""
-                if (firstId.isNotBlank()) recipientIdSet.add(firstId)
-                
-                baseThreads.add(MessageThread(threadId, firstId, null, snippet, date, read))
+
+                val existing = baseThreadsMap[threadId]
+                if (existing != null) {
+                    val newDate = maxOf(existing.date, date)
+                    val newSnippet = if (date >= existing.date && body.isNotBlank()) body else existing.snippet.ifBlank { body }
+                    val resolvedAddr = if (existing.address.isBlank() || existing.address == "Unknown" || (existing.address.all { it.isDigit() } && existing.address.length < 5)) address.ifBlank { existing.address } else existing.address
+                    baseThreadsMap[threadId] = existing.copy(
+                        date = newDate,
+                        snippet = newSnippet,
+                        address = resolvedAddr
+                    )
+                } else {
+                    if (threadId.isNotBlank()) {
+                        baseThreadsMap[threadId] = MessageThread(
+                            threadId = threadId,
+                            address = address,
+                            contactName = null,
+                            snippet = body,
+                            date = date,
+                            read = read,
+                            isSpam = false,
+                            isArchived = false
+                        )
+                    }
+                }
             }
         }
     } catch (e: Exception) {
-        Log.e("SMSBlocker", "Failed to query conversations legacy", e)
+        Log.e("SMSBlocker", "Error scanning SMS table for missing/sent threads", e)
     }
 
-    if (baseThreads.isEmpty()) return@withContext emptyList()
-
-    val addrMap = mutableMapOf<String, String>()
-    if (recipientIdSet.isNotEmpty()) {
-        val selection = "_id IN (${recipientIdSet.joinToString(",")})"
-        try {
-            contentResolver.query("content://mms-sms/canonical-addresses".toUri(), arrayOf("_id", "address"), selection, null, null)?.use { c ->
-                val idIdx = c.getColumnIndex("_id")
-                val addrIdx = c.getColumnIndex("address")
-                while (c.moveToNext()) {
-                    addrMap[c.getString(idIdx)] = c.getString(addrIdx)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("SMSBlocker", "Error fetching addresses", e)
+    return@withContext baseThreadsMap.values.map { thread ->
+        val resolvedAddr = if (addrMap.containsKey(thread.address)) {
+            addrMap[thread.address] ?: thread.address
+        } else {
+            thread.address
         }
-    }
-
-    return@withContext baseThreads.map { thread ->
-        val addr = addrMap[thread.address] ?: "Unknown"
+        val addr = if (resolvedAddr.isBlank()) "Unknown" else resolvedAddr
         val normalized = addr.replace(Regex("[^0-9+]"), "")
         thread.copy(
             address = addr,
@@ -2848,12 +2843,52 @@ private suspend fun resolveMissingSnippets(context: Context, threads: List<Messa
     return@withContext kotlinx.coroutines.coroutineScope {
         threads.map { thread ->
             async {
-                if (thread.snippet.isBlank()) {
-                    thread.copy(snippet = fetchFallbackSnippet(contentResolver, thread.threadId))
-                } else thread
+                val snippet = if (thread.snippet.isBlank()) fetchFallbackSnippet(contentResolver, thread.threadId) else thread.snippet
+                val (latestDate, latestAddr) = fetchLatestMessageInfo(contentResolver, thread.threadId)
+                val newDate = if (latestDate > 0L) maxOf(thread.date, latestDate) else thread.date
+                val newAddr = if (thread.address == "Unknown" || thread.address.isBlank()) (latestAddr ?: thread.address) else thread.address
+                thread.copy(
+                    snippet = snippet,
+                    date = newDate,
+                    address = newAddr
+                )
             }
         }.awaitAll()
     }
+}
+
+private fun fetchLatestMessageInfo(contentResolver: ContentResolver, threadId: String): Pair<Long, String?> {
+    var maxDate = 0L
+    var foundAddress: String? = null
+    try {
+        contentResolver.query(
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(Telephony.Sms.DATE, Telephony.Sms.ADDRESS),
+            "${Telephony.Sms.THREAD_ID} = ?",
+            arrayOf(threadId),
+            "date DESC LIMIT 1"
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                var d = c.getLong(0)
+                if (d < 10000000000L) d *= 1000
+                maxDate = d
+                foundAddress = c.getString(1)
+            }
+        }
+        contentResolver.query(
+            Telephony.Mms.CONTENT_URI,
+            arrayOf(Telephony.Mms.DATE),
+            "thread_id = ?",
+            arrayOf(threadId),
+            "date DESC LIMIT 1"
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                val d = c.getLong(0) * 1000
+                maxDate = maxOf(maxDate, d)
+            }
+        }
+    } catch (_: Exception) {}
+    return Pair(maxDate, foundAddress)
 }
 
 private fun fetchFallbackSnippet(contentResolver: ContentResolver, threadId: String): String {
