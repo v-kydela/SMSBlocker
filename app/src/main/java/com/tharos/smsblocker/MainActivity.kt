@@ -209,6 +209,8 @@ data class ConversationAction(
     val iconTint: Color = Color.Unspecified
 )
 
+private val messageCache = java.util.concurrent.ConcurrentHashMap<String, List<ChatMessage>>()
+
 private val ALL_ACTIONS by lazy {
     mapOf(
         ActionType.DELETE to ConversationAction(ActionType.DELETE, "Delete", Icons.Default.Delete),
@@ -529,7 +531,10 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
         pendingDeletions = updatedDeletions
         deletionPrefs.edit { putStringSet("ids", updatedDeletions) }
         scope.launch {
-            threadIds.forEach { deleteThread(context, it) }
+            threadIds.forEach {
+                messageCache.remove(it)
+                deleteThread(context, it)
+            }
             threads = threads.filter { it.threadId !in threadIds }
             saveThreadsToCache(context, threads)
         }
@@ -1790,11 +1795,11 @@ fun ChatScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var currentThreadId by rememberSaveable(threadId) { mutableStateOf(threadId) }
-    var messages by rememberSaveable(currentThreadId) { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var messages by rememberSaveable(currentThreadId) { mutableStateOf(messageCache[currentThreadId] ?: emptyList()) }
     var textValue by rememberSaveable { mutableStateOf("") }
     var attachedUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     val listState = rememberLazyListState()
-    var isLoading by remember(currentThreadId) { mutableStateOf(currentThreadId != "-1") }
+    var isLoading by remember(currentThreadId) { mutableStateOf(currentThreadId != "-1" && messages.isEmpty()) }
     var showBlockDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showDetailsDialog by remember { mutableStateOf(false) }
@@ -1816,7 +1821,9 @@ fun ChatScreen(
     }
 
     LaunchedEffect(currentThreadId, address, refreshTrigger) {
-        isLoading = true
+        if (messages.isEmpty()) {
+            isLoading = true
+        }
         var targetThreadId = currentThreadId
         
         if (targetThreadId == "-1" && address.isNotBlank()) {
@@ -1830,7 +1837,9 @@ fun ChatScreen(
 
         if (targetThreadId != "-1") {
             Log.d("SMSBlocker", "Fetching messages for thread: $targetThreadId")
-            messages = fetchMessagesForThread(context, targetThreadId)
+            val fetched = fetchMessagesForThread(context, targetThreadId)
+            messages = fetched
+            messageCache[targetThreadId] = fetched
         } else {
             Log.d("SMSBlocker", "No thread ID for address: $address, showing empty chat")
             messages = emptyList()
@@ -2112,7 +2121,9 @@ fun ChatScreen(
                                     }
                                 }
                                 if (currentThreadId != "-1") {
-                                    messages = fetchMessagesForThread(context, currentThreadId)
+                                    val fetched = fetchMessagesForThread(context, currentThreadId)
+                                    messages = fetched
+                                    messageCache[currentThreadId] = fetched
                                 }
                             }
                         }
@@ -3018,6 +3029,52 @@ private suspend fun resolveThreadDetails(context: Context, threads: List<Message
     }
 }
 
+private fun fetchMmsDataBulk(contentResolver: ContentResolver, mmsIds: List<String>): Map<String, MmsData> {
+    if (mmsIds.isEmpty()) return emptyMap()
+    val resultMap = mutableMapOf<String, MmsData>()
+    val projection = arrayOf("mid", "ct", "text", "_id")
+    val uri = "content://mms/part".toUri()
+
+    mmsIds.chunked(100).forEach { chunk ->
+        val placeholders = chunk.joinToString(",") { "?" }
+        val selection = "mid IN ($placeholders)"
+        val selectionArgs = chunk.toTypedArray()
+        try {
+            contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+                val midIdx = cursor.getColumnIndex("mid")
+                val ctIdx = cursor.getColumnIndex("ct")
+                val textIdx = cursor.getColumnIndex("text")
+                val idIdx = cursor.getColumnIndex("_id")
+                if (midIdx == -1) return@use
+
+                while (cursor.moveToNext()) {
+                    val mid = cursor.getString(midIdx) ?: continue
+                    val ct = if (ctIdx != -1) cursor.getString(ctIdx) else null
+                    val existing = resultMap[mid] ?: MmsData("", null, false)
+
+                    var text = existing.text
+                    var imageUri = existing.imageUri
+                    var isVideo = existing.isVideo
+
+                    if (ct == "text/plain") {
+                        if (textIdx != -1) text += (cursor.getString(textIdx) ?: "")
+                    } else if (ct != null && (ct.startsWith("image/") || ct.startsWith("video/"))) {
+                        if (idIdx != -1) {
+                            val partId = cursor.getString(idIdx)
+                            imageUri = "content://mms/part/$partId".toUri()
+                            isVideo = ct.startsWith("video/")
+                        }
+                    }
+                    resultMap[mid] = MmsData(text, imageUri, isVideo)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("SMSBlocker", "Error fetching MMS data bulk", e)
+        }
+    }
+    return resultMap
+}
+
 private suspend fun fetchMessagesForThread(context: Context, threadId: String): List<ChatMessage> = withContext(Dispatchers.IO) {
     val contentResolver = context.contentResolver
     val selectionArgs = arrayOf(threadId)
@@ -3060,6 +3117,7 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
                 val mmsProjection = arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.SUBJECT)
                 val mmsSelection = "thread_id = ?"
                 
+                val mmsMetaList = mutableListOf<Triple<String, Long, Pair<Boolean, String>>>()
                 contentResolver.query(mmsUri, mmsProjection, mmsSelection, selectionArgs, null)?.use { cursor ->
                     val idIdx = cursor.getColumnIndex(Telephony.Mms._ID)
                     val dateIdx = cursor.getColumnIndex(Telephony.Mms.DATE)
@@ -3072,20 +3130,28 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
                             val date = cursor.getLong(dateIdx) * 1000 
                             val isMe = cursor.getInt(boxIdx) == Telephony.Mms.MESSAGE_BOX_SENT
                             val subject = if (subIdx != -1) cursor.getString(subIdx) ?: "" else ""
-                            
-                            val mmsData = fetchMmsData(contentResolver, mmsId)
-                            val bodyText = mmsData.text.ifBlank { subject }
-                            
-                            if (bodyText.isNotBlank() || mmsData.imageUri != null) {
-                                mmsMessages.add(ChatMessage(
-                                    id = "mms_$mmsId",
-                                    body = bodyText,
-                                    date = date,
-                                    isMe = isMe,
-                                    imageUri = mmsData.imageUri,
-                                    isVideo = mmsData.isVideo
-                                ))
-                            }
+                            mmsMetaList.add(Triple(mmsId, date, Pair(isMe, subject)))
+                        }
+                    }
+                }
+
+                if (mmsMetaList.isNotEmpty()) {
+                    val mmsIds = mmsMetaList.map { it.first }
+                    val mmsDataMap = fetchMmsDataBulk(contentResolver, mmsIds)
+                    for ((mmsId, date, isMeAndSub) in mmsMetaList) {
+                        val (isMe, subject) = isMeAndSub
+                        val mmsData = mmsDataMap[mmsId] ?: MmsData("", null, false)
+                        val bodyText = mmsData.text.ifBlank { subject }
+                        
+                        if (bodyText.isNotBlank() || mmsData.imageUri != null) {
+                            mmsMessages.add(ChatMessage(
+                                id = "mms_$mmsId",
+                                body = bodyText,
+                                date = date,
+                                isMe = isMe,
+                                imageUri = mmsData.imageUri,
+                                isVideo = mmsData.isVideo
+                            ))
                         }
                     }
                 }
@@ -3277,7 +3343,10 @@ private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
         var bestTargetIndex = -1
         var bestTimeDiff = Long.MAX_VALUE
 
-        for (j in messages.indices) {
+        val startIdx = maxOf(0, i - 200)
+        val endIdx = minOf(messages.size - 1, i + 50)
+
+        for (j in startIdx..endIdx) {
             if (i == j) continue
             val target = messages[j]
 
@@ -3305,7 +3374,9 @@ private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
 
         // Fallback: If no target matched strict snippet comparison, pick the closest regular message before reaction date
         if (bestTargetIndex == -1) {
-            for (j in messages.indices.reversed()) {
+            val fallbackStart = minOf(messages.size - 1, i - 1)
+            val fallbackEnd = maxOf(0, i - 100)
+            for (j in fallbackStart downTo fallbackEnd) {
                 if (i == j) continue
                 val candidate = messages[j]
                 if (candidate.date <= msg.date + 60000 && parseReaction(candidate.body) == null) {
@@ -3343,12 +3414,13 @@ private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsDa
     val selection = "mid = ?"
     val selectionArgs = arrayOf(mmsId)
     val uri = "content://mms/part".toUri()
+    val projection = arrayOf("ct", "text", "_id")
     var text = ""
     var imageUri: Uri? = null
     var isVideo = false
     
     try {
-        contentResolver.query(uri, null, selection, selectionArgs, null)?.use { cursor ->
+        contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
             val ctIdx = cursor.getColumnIndex("ct")
             val textIdx = cursor.getColumnIndex("text")
             val idIdx = cursor.getColumnIndex("_id")
