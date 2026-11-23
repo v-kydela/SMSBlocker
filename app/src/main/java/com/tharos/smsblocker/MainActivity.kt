@@ -1803,6 +1803,66 @@ fun ChatScreen(
     var showBlockDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showDetailsDialog by remember { mutableStateOf(false) }
+    var selectedMessageForReaction by remember { mutableStateOf<ChatMessage?>(null) }
+
+    val handleReaction: (ChatMessage, String) -> Unit = { msg, emoji ->
+        val isMedia = msg.imageUri != null && msg.body.isBlank()
+        val rawSnippet = if (msg.body.isNotBlank()) {
+            if (msg.body.length > 60) msg.body.take(60) else msg.body
+        } else if (msg.imageUri != null) {
+            if (msg.isVideo) "a video" else "an image"
+        } else {
+            "a message"
+        }
+
+        val isRemoving = msg.reactions.contains(emoji)
+        val reactionText = if (isRemoving) {
+            if (isMedia) {
+                "Removed $emoji from $rawSnippet"
+            } else {
+                "Removed $emoji from “$rawSnippet”"
+            }
+        } else {
+            if (isMedia) {
+                when (emoji) {
+                    "👍" -> "Liked $rawSnippet"
+                    "❤️" -> "Loved $rawSnippet"
+                    "😂" -> "Laughed at $rawSnippet"
+                    "👎" -> "Disliked $rawSnippet"
+                    "‼️" -> "Emphasized $rawSnippet"
+                    "❓" -> "Questioned $rawSnippet"
+                    else -> "Reacted $emoji to $rawSnippet"
+                }
+            } else {
+                when (emoji) {
+                    "👍" -> "Liked “$rawSnippet”"
+                    "❤️" -> "Loved “$rawSnippet”"
+                    "😂" -> "Laughed at “$rawSnippet”"
+                    "👎" -> "Disliked “$rawSnippet”"
+                    "‼️" -> "Emphasized “$rawSnippet”"
+                    "❓" -> "Questioned “$rawSnippet”"
+                    else -> "Reacted $emoji to “$rawSnippet”"
+                }
+            }
+        }
+
+        scope.launch {
+            sendMessage(
+                context,
+                address,
+                reactionText,
+                if (currentThreadId == "-1") null else currentThreadId
+            )
+            if (currentThreadId == "-1") {
+                currentThreadId = fetchThreadIdByAddress(context, address) ?: "-1"
+            }
+            if (currentThreadId != "-1") {
+                val fetched = fetchMessagesForThread(context, currentThreadId)
+                messages = fetched
+                messageCache[currentThreadId] = fetched
+            }
+        }
+    }
 
     val attachmentPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -1958,6 +2018,23 @@ fun ChatScreen(
                 )
             }
 
+            selectedMessageForReaction?.let { msg ->
+                MessageReactionDialog(
+                    message = msg,
+                    onDismiss = { selectedMessageForReaction = null },
+                    onSelectEmoji = { emoji ->
+                        handleReaction(msg, emoji)
+                        selectedMessageForReaction = null
+                    },
+                    onCopyText = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("Message", msg.body)
+                        clipboard.setPrimaryClip(clip)
+                        Toast.makeText(context, "Text copied", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
             Box(modifier = Modifier.weight(1f)) {
                 if (isLoading && messages.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1971,7 +2048,11 @@ fun ChatScreen(
                     reverseLayout = true
                 ) {
                     items(messages.asReversed()) { message ->
-                        MessageBubble(message, onImageClick = onImageClick)
+                        MessageBubble(
+                            message = message,
+                            onImageClick = onImageClick,
+                            onShowReactionPicker = { selectedMessageForReaction = it }
+                        )
                     }
                 }
             }
@@ -2138,7 +2219,126 @@ fun ChatScreen(
 }
 
 @Composable
-fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
+fun MessageReactionDialog(
+    message: ChatMessage,
+    onDismiss: () -> Unit,
+    onSelectEmoji: (String) -> Unit,
+    onCopyText: (() -> Unit)? = null
+) {
+    val emojis = listOf("👍", "❤️", "😂", "😮", "😢", "😡", "👎", "‼️", "❓")
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Reactions",
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (message.body.isNotBlank()) {
+                    Text(
+                        text = "\"${message.body.take(100)}${if (message.body.length > 100) "..." else ""}\"",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                }
+                
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    emojis.take(5).forEach { emoji ->
+                        val isSelected = message.reactions.contains(emoji)
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clickable {
+                                    onSelectEmoji(emoji)
+                                    onDismiss()
+                                }
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(text = emoji, fontSize = 20.sp)
+                            }
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    emojis.drop(5).forEach { emoji ->
+                        val isSelected = message.reactions.contains(emoji)
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clickable {
+                                    onSelectEmoji(emoji)
+                                    onDismiss()
+                                }
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(text = emoji, fontSize = 20.sp)
+                            }
+                        }
+                    }
+                }
+                
+                if (onCopyText != null && message.body.isNotBlank()) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onCopyText()
+                                onDismiss()
+                            }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "Copy text",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("Copy text", style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun MessageBubble(
+    message: ChatMessage,
+    onImageClick: (Uri) -> Unit,
+    onShowReactionPicker: (ChatMessage) -> Unit = {}
+) {
     val context = LocalContext.current
     val alignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
     val color = if (message.isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
@@ -2156,7 +2356,11 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
             Surface(
                 color = color,
                 shape = bubbleShape,
-                shadowElevation = 1.dp
+                shadowElevation = 1.dp,
+                modifier = Modifier.combinedClickable(
+                    onClick = { },
+                    onLongClick = { onShowReactionPicker(message) }
+                )
             ) {
                 SelectionContainer {
                     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -2303,7 +2507,9 @@ fun MessageBubble(message: ChatMessage, onImageClick: (Uri) -> Unit) {
             
             if (message.reactions.isNotEmpty()) {
                 Row(
-                    modifier = Modifier.padding(top = 2.dp)
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clickable { onShowReactionPicker(message) }
                 ) {
                     message.reactions.forEach { emoji ->
                         Surface(
