@@ -245,3 +245,27 @@ fun getManualUnread(context: Context): Set<String> =
 fun saveManualUnread(context: Context, ids: Set<String>) =
     saveStringSetPref(context, PREFS_MANUAL_UNREAD, KEY_IDS, ids)
 
+private const val PREFS_REACTIONS = "local_reactions"
+
+fun getLocalReactions(context: Context, threadId: String): Map<String, List<String>> {
+    val prefs = context.getSharedPreferences("${PREFS_REACTIONS}_$threadId", Context.MODE_PRIVATE)
+    val map = mutableMapOf<String, List<String>>()
+    prefs.all.forEach { (msgId, value) ->
+        val list = (value as? String)?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+        map[msgId] = list
+    }
+    return map
+}
+
+fun saveLocalReaction(context: Context, threadId: String, msgId: String, reactions: List<String>) {
+    val prefs = context.getSharedPreferences("${PREFS_REACTIONS}_$threadId", Context.MODE_PRIVATE)
+    prefs.edit {
+        putString(msgId, reactions.joinToString(","))
+    }
+}
+
+fun clearLocalReactions(context: Context, threadId: String) {
+    context.getSharedPreferences("${PREFS_REACTIONS}_$threadId", Context.MODE_PRIVATE).edit { clear() }
+}
+
+

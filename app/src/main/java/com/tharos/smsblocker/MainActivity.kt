@@ -1816,7 +1816,7 @@ fun ChatScreen(
         }
 
         val isRemoving = msg.reactions.contains(emoji)
-        val reactionText = if (isRemoving) {
+        val reactionTextWithoutTag = if (isRemoving) {
             if (isMedia) {
                 "Removed $emoji from $rawSnippet"
             } else {
@@ -1846,11 +1846,29 @@ fun ChatScreen(
             }
         }
 
+        val hiddenTag = encodeHiddenTimestamp(msg.date)
+        val fullReactionText = "$reactionTextWithoutTag$hiddenTag"
+
+        // Immediate local UI update & persistent storage
+        val updatedReactions = msg.reactions.toMutableList()
+        if (isRemoving) {
+            updatedReactions.remove(emoji)
+        } else {
+            if (!updatedReactions.contains(emoji)) {
+                updatedReactions.add(emoji)
+            }
+        }
+        saveLocalReaction(context, currentThreadId, msg.id, updatedReactions)
+        messages = messages.map {
+            if (it.id == msg.id) it.copy(reactions = updatedReactions) else it
+        }
+        messageCache[currentThreadId] = messages
+
         scope.launch {
             sendMessage(
                 context,
                 address,
-                reactionText,
+                fullReactionText,
                 if (currentThreadId == "-1") null else currentThreadId
             )
             if (currentThreadId == "-1") {
@@ -3368,14 +3386,60 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
         }
 
         val allMessages = smsDeferred.await() + mmsDeferred.await()
-        processReactions(allMessages.sortedBy { it.date })
+        val processed = processReactions(allMessages.sortedBy { it.date })
+        val localMap = getLocalReactions(context, threadId)
+        processed.map { message ->
+            if (localMap.containsKey(message.id)) {
+                val localMyList = localMap[message.id] ?: emptyList()
+                message.copy(reactions = localMyList)
+            } else {
+                message
+            }
+        }
     }
+}
+
+private const val ZW_MARKER = "\u200B\u200C"
+private const val ZW_0 = "\u200B"
+private const val ZW_1 = "\u200C"
+
+fun encodeHiddenTimestamp(timestamp: Long): String {
+    val binary = java.lang.Long.toBinaryString(timestamp)
+    val encoded = binary.map { if (it == '0') ZW_0 else ZW_1 }.joinToString("")
+    return "$ZW_MARKER$encoded$ZW_MARKER"
+}
+
+fun extractHiddenTimestamp(text: String): Long? {
+    val startIdx = text.indexOf(ZW_MARKER)
+    if (startIdx == -1) return null
+    val endIdx = text.indexOf(ZW_MARKER, startIdx + ZW_MARKER.length)
+    if (endIdx == -1) return null
+    val encoded = text.substring(startIdx + ZW_MARKER.length, endIdx)
+    val binary = encoded.mapNotNull {
+        when (it) {
+            '\u200B' -> '0'
+            '\u200C' -> '1'
+            else -> null
+        }
+    }.joinToString("")
+    return binary.toLongOrNull(2)
+}
+
+fun stripHiddenTags(text: String): String {
+    val startIdx = text.indexOf(ZW_MARKER)
+    if (startIdx == -1) return text
+    val endIdx = text.indexOf(ZW_MARKER, startIdx + ZW_MARKER.length)
+    if (endIdx == -1) return text.replace(ZW_MARKER, "")
+    val prefix = text.substring(0, startIdx)
+    val suffix = text.substring(endIdx + ZW_MARKER.length)
+    return prefix + suffix
 }
 
 private data class ParsedReaction(
     val emoji: String,
     val snippet: String,
-    val isRemoval: Boolean
+    val isRemoval: Boolean,
+    val targetTimestamp: Long? = null
 )
 
 private val REACTION_MAP = mapOf(
@@ -3417,49 +3481,50 @@ private fun cleanSnippet(raw: String): String {
 }
 
 private fun parseReaction(body: String): ParsedReaction? {
-    val text = body.trim()
-    if (text.isBlank()) return null
+    val hiddenTimestamp = extractHiddenTimestamp(body)
+    val cleanBody = stripHiddenTags(body).trim()
+    if (cleanBody.isBlank()) return null
 
     // 1. Check Removal Patterns
     val removalRegex = Regex("^Removed\\s+(?:a\\s+|an\\s+)?(.+?)\\s+(?:from|to)\\s+(.*)$", RegexOption.IGNORE_CASE)
-    val removalMatch = removalRegex.find(text)
+    val removalMatch = removalRegex.find(cleanBody)
     if (removalMatch != null) {
         val rawEmojiOrWord = removalMatch.groupValues[1].trim()
         val rawSnippet = removalMatch.groupValues[2].trim()
         val emoji = REACTION_MAP[rawEmojiOrWord.lowercase()] ?: rawEmojiOrWord
         val snippet = cleanSnippet(rawSnippet)
         if (snippet.isNotBlank()) {
-            return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = true)
+            return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = true, targetTimestamp = hiddenTimestamp)
         }
     }
 
     // 2. Check "Reacted [with] <emoji/word> to/from <snippet>"
     val reactedWithEmojiRegex = Regex("^Reacted\\s+(?:with\\s+)?(\\S+)\\s+(?:to|from)\\s+(.*)$", RegexOption.IGNORE_CASE)
-    val reactedMatch = reactedWithEmojiRegex.find(text)
+    val reactedMatch = reactedWithEmojiRegex.find(cleanBody)
     if (reactedMatch != null) {
         val rawEmojiOrWord = reactedMatch.groupValues[1].trim()
         val rawSnippet = reactedMatch.groupValues[2].trim()
         val emoji = REACTION_MAP[rawEmojiOrWord.lowercase()] ?: rawEmojiOrWord
         val snippet = cleanSnippet(rawSnippet)
         if (snippet.isNotBlank()) {
-            return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false)
+            return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false, targetTimestamp = hiddenTimestamp)
         }
     }
 
     // 3. Check "Reacted to/from <snippet>"
     val reactedGenericRegex = Regex("^Reacted\\s+(?:to|from)\\s+(.*)$", RegexOption.IGNORE_CASE)
-    val reactedGenericMatch = reactedGenericRegex.find(text)
+    val reactedGenericMatch = reactedGenericRegex.find(cleanBody)
     if (reactedGenericMatch != null) {
         val rawSnippet = reactedGenericMatch.groupValues[1].trim()
         val snippet = cleanSnippet(rawSnippet)
         if (snippet.isNotBlank()) {
-            return ParsedReaction(emoji = "👍", snippet = snippet, isRemoval = false)
+            return ParsedReaction(emoji = "👍", snippet = snippet, isRemoval = false, targetTimestamp = hiddenTimestamp)
         }
     }
 
     // 4. Check Verb-first patterns (iOS Tapbacks): "Liked “Hello”", "Loved an image"
     val verbRegex = Regex("^(Liked|Loved|Disliked|Laughed at|Emphasized|Questioned)\\s+(.*)$", RegexOption.IGNORE_CASE)
-    val verbMatch = verbRegex.find(text)
+    val verbMatch = verbRegex.find(cleanBody)
     if (verbMatch != null) {
         val verb = verbMatch.groupValues[1].trim()
         val rawSnippet = verbMatch.groupValues[2].trim()
@@ -3474,14 +3539,14 @@ private fun parseReaction(body: String): ParsedReaction? {
             val emoji = REACTION_MAP[verb.lowercase()] ?: "👍"
             val snippet = cleanSnippet(rawSnippet)
             if (snippet.isNotBlank()) {
-                return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false)
+                return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false, targetTimestamp = hiddenTimestamp)
             }
         }
     }
 
     // 5. Check "<emoji> to <snippet>" (e.g. "👍 to “Hello”")
     val emojiToRegex = Regex("^(\\S+)\\s+to\\s+(.*)$", RegexOption.IGNORE_CASE)
-    val emojiToMatch = emojiToRegex.find(text)
+    val emojiToMatch = emojiToRegex.find(cleanBody)
     if (emojiToMatch != null) {
         val rawEmoji = emojiToMatch.groupValues[1].trim()
         val rawSnippet = emojiToMatch.groupValues[2].trim()
@@ -3491,7 +3556,7 @@ private fun parseReaction(body: String): ParsedReaction? {
             val emoji = REACTION_MAP[rawEmoji.lowercase()] ?: rawEmoji
             val snippet = cleanSnippet(rawSnippet)
             if (snippet.isNotBlank()) {
-                return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false)
+                return ParsedReaction(emoji = emoji, snippet = snippet, isRemoval = false, targetTimestamp = hiddenTimestamp)
             }
         }
     }
@@ -3541,79 +3606,83 @@ private fun isTargetMatch(target: ChatMessage, snippet: String): Boolean {
 private fun processReactions(messages: List<ChatMessage>): List<ChatMessage> {
     val reactionMessages = mutableSetOf<String>()
     val resultMessages = messages.map { it.copy() }.toMutableList()
+    val reactionMap = mutableMapOf<String, Pair<MutableList<String>, MutableList<String>>>()
 
     for (i in messages.indices) {
         val msg = messages[i]
         val parsed = parseReaction(msg.body) ?: continue
 
         var bestTargetIndex = -1
-        var bestTimeDiff = Long.MAX_VALUE
 
-        val startIdx = maxOf(0, i - 200)
-        val endIdx = minOf(messages.size - 1, i + 50)
-
-        for (j in startIdx..endIdx) {
-            if (i == j) continue
-            val target = messages[j]
-
-            if (isTargetMatch(target, parsed.snippet)) {
-                val timeDiff = abs(msg.date - target.date)
-                val isBeforeOrClose = target.date <= msg.date + 60000
-
-                if (bestTargetIndex == -1) {
-                    bestTargetIndex = j
-                    bestTimeDiff = timeDiff
-                } else {
-                    val currentBestTarget = messages[bestTargetIndex]
-                    val currentBestIsBefore = currentBestTarget.date <= msg.date + 60000
-
-                    if (isBeforeOrClose && !currentBestIsBefore) {
-                        bestTargetIndex = j
-                        bestTimeDiff = timeDiff
-                    } else if (isBeforeOrClose == currentBestIsBefore && timeDiff < bestTimeDiff) {
-                        bestTargetIndex = j
-                        bestTimeDiff = timeDiff
-                    }
-                }
-            }
-        }
-
-        // Fallback: If no target matched strict snippet comparison, pick the closest regular message before reaction date
-        if (bestTargetIndex == -1) {
-            val fallbackStart = minOf(messages.size - 1, i - 1)
-            val fallbackEnd = maxOf(0, i - 100)
-            for (j in fallbackStart downTo fallbackEnd) {
+        // 1. First priority: Exact match by hidden target timestamp tag
+        if (parsed.targetTimestamp != null) {
+            val targetTime = parsed.targetTimestamp
+            for (j in messages.indices) {
                 if (i == j) continue
                 val candidate = messages[j]
-                if (candidate.date <= msg.date + 60000 && parseReaction(candidate.body) == null) {
+                if (abs(candidate.date - targetTime) <= 3000) {
                     bestTargetIndex = j
                     break
                 }
             }
         }
 
-        if (bestTargetIndex != -1) {
-            val target = resultMessages[bestTargetIndex]
-            val currentReactions = target.reactions.toMutableList()
+        // 2. Second priority: Snippet matching (for external devices without hidden tag)
+        if (bestTargetIndex == -1) {
+            val startIdx = maxOf(0, i - 200)
+            val endIdx = minOf(messages.size - 1, i + 50)
 
-            if (parsed.isRemoval) {
-                if (parsed.emoji.equals("reaction", ignoreCase = true)) {
-                    currentReactions.clear()
-                } else {
-                    currentReactions.remove(parsed.emoji)
-                }
-            } else {
-                if (!currentReactions.contains(parsed.emoji)) {
-                    currentReactions.add(parsed.emoji)
+            // Search backwards from reaction position to find candidate closest in time prior to reaction
+            for (j in i - 1 downTo 0) {
+                if (j < startIdx) break
+                val target = messages[j]
+                if (isTargetMatch(target, parsed.snippet)) {
+                    bestTargetIndex = j
+                    break
                 }
             }
 
-            resultMessages[bestTargetIndex] = target.copy(reactions = currentReactions)
+            // If backward search didn't find a match, search forward up to endIdx
+            if (bestTargetIndex == -1) {
+                for (j in i + 1..endIdx) {
+                    val target = messages[j]
+                    if (isTargetMatch(target, parsed.snippet)) {
+                        bestTargetIndex = j
+                        break
+                    }
+                }
+            }
+        }
+
+        if (bestTargetIndex != -1) {
+            val target = resultMessages[bestTargetIndex]
+            val (myList, theirList) = reactionMap.getOrPut(target.id) {
+                Pair(mutableListOf(), mutableListOf())
+            }
+
+            val targetList = if (msg.isMe) myList else theirList
+
+            if (parsed.isRemoval) {
+                if (parsed.emoji.equals("reaction", ignoreCase = true)) {
+                    targetList.clear()
+                } else {
+                    targetList.remove(parsed.emoji)
+                }
+            } else {
+                if (!targetList.contains(parsed.emoji)) {
+                    targetList.add(parsed.emoji)
+                }
+            }
+
             reactionMessages.add(msg.id)
         }
     }
 
-    return resultMessages.filter { it.id !in reactionMessages }
+    return resultMessages.filter { it.id !in reactionMessages }.map { message ->
+        val (myList, theirList) = reactionMap[message.id] ?: Pair(emptyList<String>(), emptyList<String>())
+        val combined = (theirList + myList).distinct()
+        message.copy(reactions = combined)
+    }
 }
 
 private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsData {
@@ -3760,6 +3829,7 @@ private suspend fun deleteThread(context: Context, threadId: String) = withConte
     try {
         val contentResolver = context.contentResolver
         context.getSharedPreferences("spam_timestamps", Context.MODE_PRIVATE).edit { remove(threadId) }
+        clearLocalReactions(context, threadId)
         
         // 1. Delete the conversation entry itself - this usually deletes associated messages too
         // Try multiple URIs to ensure compatibility
