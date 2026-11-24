@@ -210,6 +210,7 @@ data class ConversationAction(
 )
 
 private val messageCache = java.util.concurrent.ConcurrentHashMap<String, List<ChatMessage>>()
+@Volatile private var lastSelfWriteTime = 0L
 
 private val ALL_ACTIONS by lazy {
     mapOf(
@@ -333,7 +334,11 @@ fun MainNavigation(initialAddress: String? = null, shouldOpenSpam: Boolean = fal
     val observer = remember {
         object : android.database.ContentObserver(null) {
             override fun onChange(selfChange: Boolean) {
-                Log.d("SMSBlocker", "SMS Database changed, triggering refresh")
+                if (System.currentTimeMillis() - lastSelfWriteTime < 2000) {
+                    Log.d("SMSBlocker", "Ignoring self-triggered SMS DB change notification")
+                    return
+                }
+                Log.d("SMSBlocker", "External SMS Database changed, triggering refresh")
                 refreshTrigger++
             }
         }
@@ -1898,7 +1903,7 @@ fun ChatScreen(
         actions.filter { it.type != ActionType.MARK_READ }
     }
 
-    LaunchedEffect(currentThreadId, address, refreshTrigger) {
+    LaunchedEffect(currentThreadId, address) {
         if (messages.isEmpty()) {
             isLoading = true
         }
@@ -1915,14 +1920,33 @@ fun ChatScreen(
 
         if (targetThreadId != "-1") {
             Log.d("SMSBlocker", "Fetching messages for thread: $targetThreadId")
-            val fetched = fetchMessagesForThread(context, targetThreadId)
-            messages = fetched
-            messageCache[targetThreadId] = fetched
+            
+            // Fast initial load of recent messages if cache is empty
+            if (messages.isEmpty()) {
+                val recent = fetchMessagesForThread(context, targetThreadId, limit = 30)
+                if (recent.isNotEmpty()) {
+                    messages = recent
+                    isLoading = false
+                }
+            }
+
+            // Load full history in background
+            val fullList = fetchMessagesForThread(context, targetThreadId, limit = null)
+            messages = fullList
+            messageCache[targetThreadId] = fullList
         } else {
             Log.d("SMSBlocker", "No thread ID for address: $address, showing empty chat")
             messages = emptyList()
         }
         isLoading = false
+    }
+
+    LaunchedEffect(refreshTrigger) {
+        if (refreshTrigger > 0 && currentThreadId != "-1" && !isLoading) {
+            val fullList = fetchMessagesForThread(context, currentThreadId, limit = null)
+            messages = fullList
+            messageCache[currentThreadId] = fullList
+        }
     }
 
     LaunchedEffect(currentThreadId) {
@@ -2065,7 +2089,7 @@ fun ChatScreen(
                     state = listState,
                     reverseLayout = true
                 ) {
-                    items(messages.asReversed()) { message ->
+                    items(messages.asReversed(), key = { it.id }) { message ->
                         MessageBubble(
                             message = message,
                             onImageClick = onImageClick,
@@ -3260,11 +3284,11 @@ private fun fetchMmsDataBulk(contentResolver: ContentResolver, mmsIds: List<Stri
     val uri = "content://mms/part".toUri()
 
     mmsIds.chunked(100).forEach { chunk ->
-        val placeholders = chunk.joinToString(",") { "?" }
-        val selection = "mid IN ($placeholders)"
-        val selectionArgs = chunk.toTypedArray()
+        val sanitizedIds = chunk.mapNotNull { id -> id.filter { c -> c.isDigit() }.ifBlank { null } }
+        if (sanitizedIds.isEmpty()) return@forEach
+        val selection = "mid IN (${sanitizedIds.joinToString(",")})"
         try {
-            contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+            contentResolver.query(uri, projection, selection, null, null)?.use { cursor ->
                 val midIdx = cursor.getColumnIndex("mid")
                 val ctIdx = cursor.getColumnIndex("ct")
                 val textIdx = cursor.getColumnIndex("text")
@@ -3299,9 +3323,10 @@ private fun fetchMmsDataBulk(contentResolver: ContentResolver, mmsIds: List<Stri
     return resultMap
 }
 
-private suspend fun fetchMessagesForThread(context: Context, threadId: String): List<ChatMessage> = withContext(Dispatchers.IO) {
+private suspend fun fetchMessagesForThread(context: Context, threadId: String, limit: Int? = null): List<ChatMessage> = withContext(Dispatchers.IO) {
     val contentResolver = context.contentResolver
     val selectionArgs = arrayOf(threadId)
+    val sortOrder = if (limit != null && limit > 0) "date DESC LIMIT $limit" else null
 
     kotlinx.coroutines.coroutineScope {
         val smsDeferred = async {
@@ -3311,7 +3336,7 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
                 val smsProjection = arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE)
                 val smsSelection = "${Telephony.Sms.THREAD_ID} = ?"
                 
-                contentResolver.query(smsUri, smsProjection, smsSelection, selectionArgs, null)?.use { cursor ->
+                contentResolver.query(smsUri, smsProjection, smsSelection, selectionArgs, sortOrder)?.use { cursor ->
                     val idIdx = cursor.getColumnIndex(Telephony.Sms._ID)
                     val bodyIdx = cursor.getColumnIndex(Telephony.Sms.BODY)
                     val dateIdx = cursor.getColumnIndex(Telephony.Sms.DATE)
@@ -3342,7 +3367,7 @@ private suspend fun fetchMessagesForThread(context: Context, threadId: String): 
                 val mmsSelection = "thread_id = ?"
                 
                 val mmsMetaList = mutableListOf<Triple<String, Long, Pair<Boolean, String>>>()
-                contentResolver.query(mmsUri, mmsProjection, mmsSelection, selectionArgs, null)?.use { cursor ->
+                contentResolver.query(mmsUri, mmsProjection, mmsSelection, selectionArgs, sortOrder)?.use { cursor ->
                     val idIdx = cursor.getColumnIndex(Telephony.Mms._ID)
                     val dateIdx = cursor.getColumnIndex(Telephony.Mms.DATE)
                     val boxIdx = cursor.getColumnIndex(Telephony.Mms.MESSAGE_BOX)
@@ -3720,6 +3745,7 @@ private fun fetchMmsData(contentResolver: ContentResolver, mmsId: String): MmsDa
 }
 
 private suspend fun markThreadAsRead(context: Context, threadId: String) = withContext(Dispatchers.IO) {
+    lastSelfWriteTime = System.currentTimeMillis()
     val isDefault = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     if (!isDefault) {
         Log.w("SMSBlocker", "Not default SMS app: markThreadAsRead will likely be ignored by the system.")
@@ -3915,6 +3941,7 @@ private suspend fun fetchThreadIdByAddress(context: Context, address: String): S
 }
 
 private suspend fun sendMessage(context: Context, address: String, body: String, threadId: String?) = withContext(Dispatchers.IO) {
+    lastSelfWriteTime = System.currentTimeMillis()
     try {
         val smsManager = context.getSystemService(SmsManager::class.java)
         val parts = smsManager.divideMessage(body)
