@@ -2212,6 +2212,21 @@ fun ChatScreen(
                             val isVideoToSend = if (uriToSend != null) isVideoUri(context, uriToSend) else false
                             textValue = ""
                             attachedUri = null
+
+                            // Optimistically add sent message to UI immediately
+                            val tempMessage = ChatMessage(
+                                id = "temp_${System.currentTimeMillis()}",
+                                body = body,
+                                date = System.currentTimeMillis(),
+                                isMe = true,
+                                imageUri = uriToSend,
+                                isVideo = isVideoToSend
+                            )
+                            messages = messages + tempMessage
+                            if (currentThreadId != "-1") {
+                                messageCache[currentThreadId] = messages
+                            }
+
                             scope.launch {
                                 if (uriToSend != null) {
                                     sendMmsMessage(
@@ -2231,17 +2246,6 @@ fun ChatScreen(
                                 }
                                 if (currentThreadId == "-1") {
                                     currentThreadId = fetchThreadIdByAddress(context, address) ?: "-1"
-                                    if (currentThreadId == "-1") {
-                                        // Still no thread ID, maybe it's a new message that hasn't hit DB yet
-                                        messages = messages + ChatMessage(
-                                            id = "temp_${System.currentTimeMillis()}",
-                                            body = body,
-                                            date = System.currentTimeMillis(),
-                                            isMe = true,
-                                            imageUri = uriToSend,
-                                            isVideo = isVideoToSend
-                                        )
-                                    }
                                 }
                                 if (currentThreadId != "-1") {
                                     val fetched = fetchMessagesForThread(context, currentThreadId)
