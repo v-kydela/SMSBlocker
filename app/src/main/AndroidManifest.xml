@@ -46,7 +46,20 @@
                 <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
                 <data android:mimeType="application/vnd.wap.mms-message" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="com.tharos.smsblocker.ACTION_MMS_DOWNLOADED" />
+            </intent-filter>
         </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.tharos.smsblocker.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <receiver
             android:name=".CopyOtpReceiver"

@@ -1,6 +1,11 @@
 package com.tharos.smsblocker
 
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.core.content.edit
 
 val DEFAULT_KEYWORDS = setOf(
@@ -266,6 +271,85 @@ fun saveLocalReaction(context: Context, threadId: String, msgId: String, reactio
 
 fun clearLocalReactions(context: Context, threadId: String) {
     context.getSharedPreferences("${PREFS_REACTIONS}_$threadId", Context.MODE_PRIVATE).edit { clear() }
+}
+
+fun showBlockedNotification(context: Context, sender: String) {
+    createNotificationChannel(context)
+    val intent = Intent(context, MainActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        putExtra("open_spam", true)
+    }
+    val pendingIntent: PendingIntent = PendingIntent.getActivity(
+        context, 
+        sender.hashCode() + 1, 
+        intent, 
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
+    val senderName = getContactName(context, sender)
+    val builder = NotificationCompat.Builder(context, "spam_channel")
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setContentTitle(senderName)
+        .setContentText("Spam message blocked")
+        .setPriority(NotificationCompat.PRIORITY_LOW)
+        .setSound(null)
+        .setContentIntent(pendingIntent)
+        .setAutoCancel(true)
+
+    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    notificationManager.notify(sender.hashCode() + 1, builder.build())
+}
+
+fun showNotification(context: Context, sender: String, body: String, timestamp: Long) {
+    createNotificationChannel(context)
+
+    val activeMessages = addActiveNotificationMessage(context, sender, body, timestamp)
+    val senderName = getContactName(context, sender)
+
+    val intent = Intent(context, MainActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        putExtra("address", sender)
+    }
+    val pendingIntent: PendingIntent = PendingIntent.getActivity(
+        context, 
+        sender.hashCode(), 
+        intent, 
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
+    val userPerson = Person.Builder().setName("Me").build()
+    val senderPerson = Person.Builder().setName(senderName).build()
+
+    val messagingStyle = NotificationCompat.MessagingStyle(userPerson)
+        .setConversationTitle(null)
+
+    for (msg in activeMessages) {
+        messagingStyle.addMessage(msg.body, msg.timestamp, senderPerson)
+    }
+
+    val builder = NotificationCompat.Builder(context, "sms_channel")
+        .setSmallIcon(android.R.drawable.stat_notify_chat)
+        .setStyle(messagingStyle)
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setContentIntent(pendingIntent)
+        .setAutoCancel(true)
+
+    val latestOtpCode = activeMessages.mapNotNull { extractOtp(it.body) }.lastOrNull()
+    if (latestOtpCode != null) {
+        val copyIntent = Intent(context, CopyOtpReceiver::class.java).apply {
+            putExtra("otp_code", latestOtpCode)
+        }
+        val copyPendingIntent = PendingIntent.getBroadcast(
+            context,
+            latestOtpCode.hashCode(),
+            copyIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        builder.addAction(android.R.drawable.ic_menu_edit, "Copy $latestOtpCode", copyPendingIntent)
+    }
+
+    val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    notificationManager.notify(sender.hashCode(), builder.build())
 }
 
 
