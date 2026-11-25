@@ -1955,6 +1955,12 @@ fun ChatScreen(
         }
     }
 
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(0)
+        }
+    }
+
     AppScaffold(
         topBar = {
             TopAppBar(
@@ -2228,6 +2234,7 @@ fun ChatScreen(
                             }
 
                             scope.launch {
+                                listState.animateScrollToItem(0)
                                 if (uriToSend != null) {
                                     sendMmsMessage(
                                         context,
